@@ -16,6 +16,7 @@ hermes-rpc/
 ├── projects/
 │   ├── vos-core/             # VOS 语言层 + VOS artifact 合同镜像
 │   ├── hermes-runtime/       # RPC 领域运行时：loader / registry / dispatch
+│   ├── hermes-generator/     # operation 级 TS client / server / 业务模板生成
 │   ├── hermes-napi/          # 唯一 N-API 边界
 │   └── vos-*/                # ← 冻结的旧原型，已移出 workspace，不再编译
 ```
@@ -36,6 +37,16 @@ hermes-rpc/
 - `RpcError` / `RpcErrorCode`——稳定错误码族，wire 错误体为 `{"code": "...", "message": "..."}`
 - `CallOptions` / `CancelToken` / `CallContext`——dispatch 生命周期：deadline、取消与在途并发上限
 
+## `hermes-generator` 提供
+
+- `generate` / `generate_from_json`——从 operation artifact 产出 `GenerationPlan`
+- `hermes/operations.ts`——operation id 常量、参数 / 返回类型与 `createHermesClient(transport)`
+- `hermes/server.ts`——按 `operation_id` 绑定 handler 的 `bindOperationHandlers()`
+- `hermes/handlers.ts`——一次性业务模板，已存在则保留（`FileOwnership::Template`）
+- `Diagnostic`——无法安全映射的类型降级为 `unknown` 并记录诊断，命名冲突直接拒绝
+
+生成物不 import 任何 Hermes npm 包，只声明 `HermesTransport` 接口，由宿主运行时绑定传入。
+
 ## 接入 `vos-language`
 
 Hermes 不编译依赖 `vos` crate；它只消费 `vos-language` 产出的 JSON artifact。字段命名、span 形状与 identity 规则以上游 `vos-types` 为准，镜像改动必须以上游真实 fixture 做解码测试。
@@ -46,7 +57,7 @@ Hermes 不编译依赖 `vos` crate；它只消费 `vos-language` 产出的 JSON 
 cargo test --workspace
 ```
 
-47 个测试全部通过：18 个 projection 合同测试 + 29 个 runtime 测试。
+57 个测试全部通过：18 个 projection 合同测试 + 29 个 runtime 测试 + 10 个 generator 测试。
 
 ## 设计约束
 
