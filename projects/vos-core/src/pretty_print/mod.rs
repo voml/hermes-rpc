@@ -2,17 +2,7 @@ use std::fmt::{Arguments, Display, Formatter, Write};
 
 use indenter::CodeFormatter;
 
-use crate::{Codegen, Environment, Project, Validation};
-
-pub struct PrettyPrinter {}
-
-impl Codegen for PrettyPrinter {
-    type Output = String;
-
-    fn generate(&self, project: &Project) -> Validation<Self::Output> {
-        Validation::ok(project.to_string())
-    }
-}
+use crate::{Environment, Project};
 
 struct Context<'s, T>
 where

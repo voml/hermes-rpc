@@ -7,6 +7,8 @@
 //! TODO(hermes): 等 `vos` crate 导出正式的 `ServiceContract` 类型后，
 //! 用 `use vos::ServiceContract` 替换本 crate 内的本地占位 trait。
 
+#![deny(missing_docs)]
+
 pub use self::{
     constraint::{
         decimal_constraint::DecimalConstraint,
@@ -38,7 +40,9 @@ pub use self::{
 pub use voml_collection::Text;
 use std::fmt;
 
+/// `Object` 的有序列表别名。
 pub type List = voml_collection::List<Object>;
+/// `String → Object` 的字典别名。
 pub type Dict = voml_collection::Dict<Object>;
 
 // ---------------------------------------------------------------------------
@@ -51,30 +55,40 @@ pub mod error {
 
     use std::fmt;
 
+    /// Hermes 统一错误值，携带分类与消息。
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct HermesError {
         kind: ErrorKind,
         message: String,
     }
 
+    /// 错误分类枚举，供上层按类型分派处理。
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub enum ErrorKind {
+        /// 语法层面的错误（例如 artifact 形状不符合预期）。
         Syntax,
+        /// 校验失败（semver/url/email/span 边界等）。
         Validation,
+        /// I/O 错误（读文件等）。
         Io,
+        /// JSON 解析错误。
         Json,
+        /// 其他自定义错误。
         Custom,
     }
 
     impl HermesError {
+        /// 用给定分类和消息构造一个新的 `HermesError`。
         pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
             Self { kind, message: message.into() }
         }
 
+        /// 返回错误分类。
         pub fn kind(&self) -> ErrorKind {
             self.kind
         }
 
+        /// 返回错误消息切片。
         pub fn message(&self) -> &str {
             &self.message
         }
@@ -152,12 +166,15 @@ pub mod error {
     pub struct QError;
 
     impl QError {
+        /// 快速构造 `ErrorKind::Syntax` 错误。
         pub fn syntax_error(msg: impl Into<String>) -> HermesError {
             HermesError::new(ErrorKind::Syntax, msg)
         }
+        /// 快速构造 `ErrorKind::Validation` 错误。
         pub fn validation_error(msg: impl Into<String>) -> HermesError {
             HermesError::new(ErrorKind::Validation, msg)
         }
+        /// 快速构造 `ErrorKind::Custom` 错误。
         pub fn custom(msg: impl Into<String>) -> HermesError {
             HermesError::new(ErrorKind::Custom, msg)
         }
@@ -171,25 +188,40 @@ pub mod error {
 // Validation<T> —— 带诊断的成功/失败结果
 // ---------------------------------------------------------------------------
 
+/// 带诊断信息的成功/失败结果，比 `Result<T, HermesError>` 多携带一条 diagnostics 列表。
 #[derive(Clone, Debug)]
 pub enum Validation<T> {
-    Success { value: T, diagnostics: Vec<HermesError> },
-    Failure { diagnostics: Vec<HermesError> },
+    /// 成功分支，附带可选的 diagnostics（warn / info 等）。
+    Success {
+        /// 成功时携带的值。
+        value: T,
+        /// 诊断信息列表（warn / info 级别）。
+        diagnostics: Vec<HermesError>,
+    },
+    /// 失败分支，携带全部诊断错误。
+    Failure {
+        /// 所有失败时的诊断错误。
+        diagnostics: Vec<HermesError>,
+    },
 }
 
 impl<T> Validation<T> {
+    /// 用 `value` 构造一个不带 diagnostics 的成功结果。
     pub fn ok(value: T) -> Self {
         Self::Success { value, diagnostics: vec![] }
     }
 
+    /// 用单个错误构造一个失败结果。
     pub fn fail(err: impl Into<HermesError>) -> Self {
         Self::Failure { diagnostics: vec![err.into()] }
     }
 
+    /// 判断是否为成功分支。
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Success { .. })
     }
 
+    /// 成功分支返回 `Some(value)`，失败分支返回 `None`。
     pub fn into_option(self) -> Option<T> {
         match self {
             Self::Success { value, .. } => Some(value),
@@ -197,6 +229,7 @@ impl<T> Validation<T> {
         }
     }
 
+    /// 映射成功分支的值，失败分支原样透传。
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Validation<U> {
         match self {
             Self::Success { value, diagnostics } => {
@@ -396,7 +429,6 @@ pub mod hermes {
                 }
                 if let Some(body) = &projection.body {
                     validate_span(&body.span, source, "service body span")?;
-                    // 可选：校验 syntax slice 文本与 source 对应切片一致
                     if let Some(slice_text) = source.get(body.span.clone()) {
                         if slice_text != body.text.as_str() {
                             return Err(HermesError::new(
@@ -484,11 +516,13 @@ pub mod hermes {
     /// 单个 RPC 方法的占位描述。
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct HermesMethodDescriptor {
+        /// 方法名。
         pub name: String,
         /// 请求体的类型名（对应 VOS schema 中的 type）。
         pub request_type: String,
         /// 响应体的类型名。
         pub response_type: String,
+        /// 可选的方法文档字符串。
         #[serde(default)]
         pub docs: String,
     }
@@ -566,10 +600,13 @@ pub mod hermes {
             self.insert_contract(name, contract)
         }
 
+        /// 按全限定名查找已注册的服务。
         fn find(&self, service_name: &str) -> Option<&HermesServiceContract>;
 
+        /// 返回所有已注册服务的迭代。
         fn all(&self) -> Vec<&HermesServiceContract>;
 
+        /// 按服务名 + 方法名查找已注册的方法。
         fn method(
             &self,
             service_name: &str,
@@ -816,9 +853,13 @@ pub mod hermes {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "kebab-case")]
     pub enum HermesOperationKind {
+        /// 只读查询类 operation。
         Query,
+        /// 用户自定义函数。
         Udf,
+        /// 微型副作用 operation。
         Micro,
+        /// 宏级副作用 operation。
         Macro,
     }
 
@@ -1003,12 +1044,17 @@ pub mod hermes {
 // Parser / Codegen trait —— 从旧栈保留的接口占位
 // ---------------------------------------------------------------------------
 
+/// 旧栈 Parser trait 占位：Hermes 不再自建 VOS parser。
 pub trait Parser<S> {
+    /// 解析源 `S` 得到一个带 diagnostics 的 `Project`。
     fn parse(&self, source: &S) -> Validation<Project>;
 }
 
+/// 旧栈 Codegen trait 占位：Hermes 不再自建代码生成。
 pub trait Codegen {
+    /// 生成产物类型。
     type Output;
+    /// 从 `Project` 生成产物。
     fn generate(&self, project: &Project) -> Validation<Self::Output>;
 }
 

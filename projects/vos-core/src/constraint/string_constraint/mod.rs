@@ -1,5 +1,6 @@
 use super::*;
 
+/// 字符串类型的约束（同时支持字节长度和 Unicode 字符数两种度量）。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StringConstraint {
     /// Minimum length of utf8 string
@@ -11,6 +12,7 @@ pub struct StringConstraint {
     /// Maximum number of unicode characters
     pub max_length: Option<u32>,
 
+    /// 共享的约束元数据。
     #[serde(flatten)]
     pub info: SharedConstraint,
 }

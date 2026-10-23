@@ -1,45 +1,57 @@
 use super::*;
 
-/// ```vos
-/// n: i32[=1]
-/// n: i32[<1]
-/// n: i32[1..=2]
-/// n: i32[1 < n < 2]
-/// ```
+/// 整数类型的约束（支持有符号/无符号的多种位宽）。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IntegerConstraint {
+    /// 整数子类型（位宽 + 有符号性）。
     pub kind: IntegerKind,
-    /// Minimum length of utf8 string
+    /// 最小值（闭区间）。
     pub min: Option<BigInt>,
-    /// Maximum length of utf8 string
+    /// 最大值（闭区间）。
     pub max: Option<BigInt>,
-    /// Minimum number of unicode characters
+    /// 最小值别名（语义更清晰的写法）。
     pub min_length: Option<BigInt>,
-    /// Maximum number of unicode characters
+    /// 最大值别名（语义更清晰的写法）。
     pub max_length: Option<BigInt>,
-    /// Check if number is multiple of `x`
+    /// 必须是某个值的倍数。
     pub multiple_of: Option<BigInt>,
+    /// 示例值列表。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub examples: Vec<BigInt>,
+    /// 共享的约束元数据。
     #[serde(flatten)]
     pub info: SharedConstraint,
 }
 
+/// 整数子类型枚举，覆盖常见位宽和有符号性。
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum IntegerKind {
+    /// 任意精度整数。
     Integer,
+    /// 8 位有符号整数。
     Integer8,
+    /// 16 位有符号整数。
     Integer16,
+    /// 32 位有符号整数。
     Integer32,
+    /// 64 位有符号整数。
     Integer64,
+    /// 128 位有符号整数。
     Integer128,
+    /// 256 位有符号整数。
     Integer256,
+    /// 8 位无符号整数。
     Unsigned8,
+    /// 16 位无符号整数。
     Unsigned16,
+    /// 32 位无符号整数。
     Unsigned32,
+    /// 64 位无符号整数。
     Unsigned64,
+    /// 128 位无符号整数。
     Unsigned128,
+    /// 256 位无符号整数。
     Unsigned256,
 }
 

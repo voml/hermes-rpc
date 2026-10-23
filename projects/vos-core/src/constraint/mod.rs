@@ -1,3 +1,5 @@
+//! 所有约束类型模块的父模块。
+
 use std::str::FromStr;
 
 use num_bigint::BigInt;
@@ -15,6 +17,7 @@ pub mod integer_constraint;
 pub mod list_constraint;
 pub mod string_constraint;
 
+/// 所有约束类型共享的元数据容器（文档、说明等）。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SharedConstraint {
     document: Document,
