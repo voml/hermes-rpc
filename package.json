@@ -10,6 +10,7 @@
         "u": "cargo upgrade --workspace"
     },
     "devDependencies": {
-        "@doki-land/nifty": "^0.1.9"
+        "@doki-land/nifty": "^0.1.9",
+        "@napi-rs/cli": "^2.16"
     }
 }

@@ -9,6 +9,10 @@ time-travel.*
 .idea/
 *.iml
 
+# Node
+node_modules/
+.cache/
+
 # Rust
 target/
 Cargo.lock
