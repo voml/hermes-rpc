@@ -1,0 +1,173 @@
+# Trusted Publisher contract (sole npm trusted workflow — keep this filename):
+#   file = publish-npm.yml
+#   repo = voml/hermes-rpc
+#   env  = NPM_PUBLISH
+#
+# Triggers:
+#   - push tag v*           (e.g. v0.1.0)
+#   - workflow_dispatch     (manual retry / version input)
+# Do not register Trusted Publisher on any other workflow file.
+
+name: Publish npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without v prefix (required for workflow_dispatch)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-native:
+    name: Native ${{ matrix.short }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            short: win32-x64
+          - os: ubuntu-latest
+            short: linux-x64
+          - os: ubuntu-24.04-arm
+            short: linux-arm64
+          - os: macos-15-intel
+            short: darwin-x64
+          - os: macos-latest
+            short: darwin-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build N-API (release)
+        run: node scripts/build-napi.mjs
+
+      - name: Stage native artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="dist/${{ matrix.short }}"
+          mkdir -p "$out"
+          src="projects/hermes-napi"
+          node="$(find "$src" -maxdepth 1 -name '*.node' | head -n 1)"
+          if [[ -z "$node" ]]; then
+            echo "missing native binary under $src" >&2
+            ls -la "$src" || true
+            exit 1
+          fi
+          cp "$node" "$out/$(basename "$node")"
+          ls -la "$out"
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.short }}
+          path: dist/${{ matrix.short }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish packages
+    needs: [build-native]
+    runs-on: ubuntu-latest
+    environment: NPM_PUBLISH
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            v="${{ inputs.version }}"
+            v="${v#v}"
+            if [[ -z "$v" ]]; then
+              echo "inputs.version required for workflow_dispatch" >&2
+              exit 1
+            fi
+          else
+            ref="${GITHUB_REF#refs/tags/}"
+            v="${ref#v}"
+            if [[ -z "$v" || "$v" == *"/"* ]]; then
+              echo "could not parse version from GITHUB_REF=$GITHUB_REF" >&2
+              exit 1
+            fi
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "resolved version=$v"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          # Do NOT set registry-url: it writes _authToken into npmrc and blocks OIDC.
+
+      - name: Ensure npm supports Trusted Publishing
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: dist/native-artifacts
+
+      - name: Normalize native artifact layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/native-flat
+          for d in dist/native-artifacts/native-*; do
+            [[ -d "$d" ]] || continue
+            short="$(basename "$d" | sed 's/^native-//')"
+            mkdir -p "dist/native-flat/$short"
+            cp -r "$d"/. "dist/native-flat/$short/"
+          done
+          find dist/native-flat -type f -print
+
+      - name: Strip token-style npmrc (OIDC only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset NODE_AUTH_TOKEN NPM_TOKEN || true
+          for f in "${HOME}/.npmrc" "${NPM_CONFIG_USERCONFIG:-}" "${RUNNER_TEMP:-}/.npmrc"; do
+            [[ -n "${f}" && -f "${f}" ]] || continue
+            if grep -q '_authToken' "${f}"; then
+              grep -v '_authToken' "${f}" > "${f}.oidc" && mv "${f}.oidc" "${f}"
+              echo "stripped _authToken from ${f}"
+            fi
+          done
+
+      - name: Publish real packages
+        env:
+          GITHUB_REF: refs/tags/v${{ steps.ver.outputs.version }}
+          HERMES_NATIVE_ARTIFACTS: ${{ github.workspace }}/dist/native-flat
+        run: node scripts/ci/publish-npm.mjs --version=${{ steps.ver.outputs.version }}
