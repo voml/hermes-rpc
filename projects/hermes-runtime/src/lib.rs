@@ -13,6 +13,7 @@ pub mod contract;
 pub mod dispatcher;
 pub mod error;
 pub mod handlers;
+pub mod lifecycle;
 pub mod loader;
 pub mod registry;
 pub mod wire;
@@ -22,6 +23,7 @@ pub use self::{
     dispatcher::{HermesDispatcher, HermesOperationHandler},
     error::{RpcError, RpcErrorCode, RpcResult},
     handlers::{AddHandler, EchoHandler},
+    lifecycle::{CallContext, CallOptions, CancelToken},
     loader::{HermesServiceLoader, JsonServiceLoader},
     registry::{BTreeServiceRegistry, HermesServiceRegistry},
     wire::{HermesDispatchRequest, HermesDispatchResponse},

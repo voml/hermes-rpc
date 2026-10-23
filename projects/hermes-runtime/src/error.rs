@@ -27,6 +27,10 @@ pub enum RpcErrorCode {
     InvalidRequest,
     /// handler 执行失败。
     HandlerFailed,
+    /// dispatch deadline 已过。
+    DeadlineExceeded,
+    /// dispatch 被取消。
+    Cancelled,
     /// 内部错误（I/O、未分类错误）。
     Internal,
 }
@@ -41,6 +45,8 @@ impl RpcErrorCode {
             Self::DuplicateRegistration => "duplicate-registration",
             Self::InvalidRequest => "invalid-request",
             Self::HandlerFailed => "handler-failed",
+            Self::DeadlineExceeded => "deadline-exceeded",
+            Self::Cancelled => "cancelled",
             Self::Internal => "internal",
         }
     }

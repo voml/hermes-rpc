@@ -4,9 +4,18 @@
 //! 本身的 serde 对齐与 span 校验由 `vos-core` 的 projection 测试负责；这里用
 //! 自包含的最小 artifact 作为运行时输入。
 
+use std::{
+    sync::{Arc, Condvar, Mutex, mpsc},
+    thread,
+    time::{Duration, Instant},
+};
+
 use hermes_runtime::{
-    AddHandler, BTreeServiceRegistry, EchoHandler, HermesDispatcher, HermesMethodDescriptor, HermesServiceContract,
-    HermesServiceLoader, HermesServiceRegistry, JsonServiceLoader, error::RpcErrorCode, projection::HermesOperationKind,
+    AddHandler, BTreeServiceRegistry, CallContext, CallOptions, CancelToken, EchoHandler, HermesDispatcher,
+    HermesMethodDescriptor, HermesOperationHandler, HermesServiceContract, HermesServiceLoader, HermesServiceRegistry,
+    JsonServiceLoader, RpcResult,
+    error::RpcErrorCode,
+    projection::{HermesOperationKind, HermesOperationProjection},
 };
 
 /// 最小 service artifact：两个服务，均不带 methods。
@@ -441,10 +450,164 @@ fn rpc_error_code_wire_names_are_kebab_case() {
         (RpcErrorCode::DuplicateRegistration, "duplicate-registration"),
         (RpcErrorCode::InvalidRequest, "invalid-request"),
         (RpcErrorCode::HandlerFailed, "handler-failed"),
+        (RpcErrorCode::DeadlineExceeded, "deadline-exceeded"),
+        (RpcErrorCode::Cancelled, "cancelled"),
         (RpcErrorCode::Internal, "internal"),
     ];
     for (code, expected) in codes {
         assert_eq!(code.as_str(), expected);
         assert_eq!(serde_json::to_string(&code).unwrap(), format!("\"{expected}\""));
     }
+}
+
+// --- 生命周期：deadline / cancellation / 并发上限 -------------------------
+
+const OP_A: &str = "op_1234abcd5678ef90";
+
+fn dispatcher_with(handler: Box<dyn HermesOperationHandler>) -> HermesDispatcher {
+    let mut dispatcher = HermesDispatcher::new();
+    dispatcher.load_operation_artifact(OPERATION_ARTIFACT).expect("operation artifact ok");
+    dispatcher.register_handler(OP_A, handler).expect("register handler");
+    dispatcher
+}
+
+/// 睡过 deadline 的 handler，用来验证超时优先级高于 handler 结果。
+struct SlowHandler {
+    delay: Duration,
+}
+
+impl HermesOperationHandler for SlowHandler {
+    fn execute(
+        &self,
+        _ctx: &CallContext,
+        _projection: &HermesOperationProjection,
+        _params: &serde_json::Value,
+    ) -> RpcResult<serde_json::Value> {
+        thread::sleep(self.delay);
+        Ok(serde_json::json!({"slow": true}))
+    }
+}
+
+/// 执行中自行取消的 handler。
+struct CancelHandler;
+
+impl HermesOperationHandler for CancelHandler {
+    fn execute(
+        &self,
+        ctx: &CallContext,
+        _projection: &HermesOperationProjection,
+        _params: &serde_json::Value,
+    ) -> RpcResult<serde_json::Value> {
+        if let Some(token) = ctx.token() {
+            token.cancel();
+        }
+        Ok(serde_json::json!({"cancelled_self": true}))
+    }
+}
+
+/// 一直占着并发许可，直到 gate 被打开。
+struct HoldHandler {
+    started: mpsc::Sender<()>,
+    gate: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl HermesOperationHandler for HoldHandler {
+    fn execute(
+        &self,
+        _ctx: &CallContext,
+        _projection: &HermesOperationProjection,
+        _params: &serde_json::Value,
+    ) -> RpcResult<serde_json::Value> {
+        let _ = self.started.send(());
+        let (lock, condvar) = &*self.gate;
+        let mut open = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !*open {
+            open = condvar.wait(open).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        Ok(serde_json::json!({"held": true}))
+    }
+}
+
+fn release_gate(gate: &Arc<(Mutex<bool>, Condvar)>) {
+    let (lock, condvar) = &**gate;
+    *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    condvar.notify_all();
+}
+
+#[test]
+fn dispatch_with_expired_deadline_returns_deadline_exceeded() {
+    let dispatcher = dispatcher_with(Box::new(EchoHandler));
+    let options = CallOptions::with_deadline(Instant::now() - Duration::from_millis(1));
+
+    let err = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).unwrap_err();
+    assert_eq!(err.code(), RpcErrorCode::DeadlineExceeded);
+}
+
+#[test]
+fn dispatch_within_deadline_returns_result() {
+    let dispatcher = dispatcher_with(Box::new(EchoHandler));
+    let options = CallOptions::with_timeout(Duration::from_secs(30));
+
+    let got = dispatcher.dispatch_with(OP_A, &serde_json::json!({"ok": true}), &options).unwrap();
+    assert_eq!(got, serde_json::json!({"ok": true}));
+}
+
+#[test]
+fn dispatch_times_out_when_handler_outlives_deadline() {
+    let dispatcher = dispatcher_with(Box::new(SlowHandler { delay: Duration::from_millis(80) }));
+    let options = CallOptions::with_timeout(Duration::from_millis(10));
+
+    let err = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).unwrap_err();
+    assert_eq!(err.code(), RpcErrorCode::DeadlineExceeded);
+}
+
+#[test]
+fn dispatch_with_cancelled_token_returns_cancelled() {
+    let dispatcher = dispatcher_with(Box::new(EchoHandler));
+    let token = CancelToken::new();
+    token.cancel();
+    let options = CallOptions::new().and_cancellation(token);
+
+    let err = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).unwrap_err();
+    assert_eq!(err.code(), RpcErrorCode::Cancelled);
+}
+
+#[test]
+fn handler_can_cancel_its_own_call() {
+    let dispatcher = dispatcher_with(Box::new(CancelHandler));
+    let options = CallOptions::new().and_cancellation(CancelToken::new());
+
+    let err = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).unwrap_err();
+    assert_eq!(err.code(), RpcErrorCode::Cancelled);
+}
+
+#[test]
+fn concurrency_limit_queues_until_permit_released() {
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (started, started_rx) = mpsc::channel();
+
+    let mut dispatcher = dispatcher_with(Box::new(HoldHandler { started, gate: gate.clone() }));
+    dispatcher.set_max_concurrency(Some(1));
+    assert_eq!(dispatcher.max_concurrency(), Some(1));
+
+    let dispatcher = Arc::new(dispatcher);
+    let background = {
+        let dispatcher = Arc::clone(&dispatcher);
+        thread::spawn(move || dispatcher.dispatch(OP_A, &serde_json::json!({})))
+    };
+    started_rx.recv_timeout(Duration::from_secs(5)).expect("handler should have started");
+
+    // 唯一许可被占住：第二个调用等到 deadline，返回 deadline-exceeded
+    let options = CallOptions::with_timeout(Duration::from_millis(30));
+    let err = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).unwrap_err();
+    assert_eq!(err.code(), RpcErrorCode::DeadlineExceeded);
+
+    release_gate(&gate);
+    let held = background.join().expect("background thread joins").expect("held dispatch succeeds");
+    assert_eq!(held, serde_json::json!({"held": true}));
+
+    // 许可已归还：后续调用正常返回
+    let options = CallOptions::with_timeout(Duration::from_millis(500));
+    let got = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).expect("permit released");
+    assert_eq!(got, serde_json::json!({"held": true}));
 }

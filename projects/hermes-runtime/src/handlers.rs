@@ -7,6 +7,7 @@ use vos_core::projection::HermesOperationProjection;
 use crate::{
     dispatcher::HermesOperationHandler,
     error::{RpcError, RpcErrorCode, RpcResult},
+    lifecycle::CallContext,
 };
 
 /// 把 `params` 原样返回的测试 handler。
@@ -14,7 +15,12 @@ use crate::{
 pub struct EchoHandler;
 
 impl HermesOperationHandler for EchoHandler {
-    fn execute(&self, _projection: &HermesOperationProjection, params: &serde_json::Value) -> RpcResult<serde_json::Value> {
+    fn execute(
+        &self,
+        _ctx: &CallContext,
+        _projection: &HermesOperationProjection,
+        params: &serde_json::Value,
+    ) -> RpcResult<serde_json::Value> {
         Ok(params.clone())
     }
 }
@@ -27,7 +33,12 @@ impl HermesOperationHandler for EchoHandler {
 pub struct AddHandler;
 
 impl HermesOperationHandler for AddHandler {
-    fn execute(&self, _projection: &HermesOperationProjection, params: &serde_json::Value) -> RpcResult<serde_json::Value> {
+    fn execute(
+        &self,
+        _ctx: &CallContext,
+        _projection: &HermesOperationProjection,
+        params: &serde_json::Value,
+    ) -> RpcResult<serde_json::Value> {
         let a = params
             .get("a")
             .and_then(|v| v.as_i64())

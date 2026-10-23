@@ -10,12 +10,13 @@
 //! for dispatch results. Both carry a stable RPC error code.
 
 use hermes_runtime::{
-    HermesDispatchRequest, HermesDispatchResponse, HermesDispatcher,
+    CallOptions, HermesDispatchRequest, HermesDispatchResponse, HermesDispatcher,
     error::{RpcError, RpcErrorCode, RpcResult},
 };
 use napi::{Error as NapiError, Status};
 use napi_derive::napi;
 use serde_json::Value;
+use std::time::Duration;
 
 /// Hermes N-API version.
 #[napi]
@@ -69,6 +70,14 @@ fn decode_params(params_json: &str) -> std::result::Result<Value, HermesRpcError
     })
 }
 
+/// Build dispatch lifecycle options from an optional millisecond timeout.
+fn call_options(timeout_ms: Option<u32>) -> CallOptions {
+    match timeout_ms {
+        Some(ms) => CallOptions::with_timeout(Duration::from_millis(u64::from(ms))),
+        None => CallOptions::new(),
+    }
+}
+
 /// Opaque Hermes dispatcher handle exposed to JS.
 #[napi]
 pub struct HermesDispatcherHandle {
@@ -95,18 +104,26 @@ impl HermesDispatcherHandle {
         map_rpc(self.inner.load_operation_artifact(&json), "load_operation_artifact")
     }
 
+    /// Set the in-flight dispatch limit. `null` or `0` means unlimited.
+    #[napi]
+    pub fn set_max_concurrency(&mut self, limit: Option<u32>) {
+        self.inner.set_max_concurrency(limit.map(|limit| limit as usize));
+    }
+
     /// Dispatch by operation id (`op_<hex>`) or by name.
     ///
-    /// `params_json` must be a valid JSON object. Dispatch failures are encoded
-    /// in the structured `error` field of [`HermesDispatchJsResult`].
+    /// `params_json` must be a valid JSON object. `timeout_ms` sets the dispatch
+    /// deadline: when the handler outlives it, the structured error carries
+    /// `deadline-exceeded`. Dispatch failures are encoded in the structured
+    /// `error` field of [`HermesDispatchJsResult`].
     #[napi]
-    pub fn dispatch(&self, operation: String, params_json: String) -> HermesDispatchJsResult {
+    pub fn dispatch(&self, operation: String, params_json: String, timeout_ms: Option<u32>) -> HermesDispatchJsResult {
         let params = match decode_params(&params_json) {
             Ok(params) => params,
             Err(error) => return HermesDispatchJsResult { operation_id: String::new(), result: None, error: Some(error) },
         };
         let request = HermesDispatchRequest { operation, params };
-        response_to_js(self.inner.dispatch_request(&request))
+        response_to_js(self.inner.dispatch_request_with(&request, &call_options(timeout_ms)))
     }
 }
 
@@ -125,6 +142,7 @@ pub fn run_hermes_dispatch(
     operation_artifact_json: String,
     operation: String,
     params_json: String,
+    timeout_ms: Option<u32>,
 ) -> std::result::Result<HermesDispatchJsResult, NapiError> {
     let mut dispatcher = HermesDispatcher::new();
     map_rpc(dispatcher.load_service_artifact(&service_artifact_json), "load_service_artifact")?;
@@ -134,5 +152,5 @@ pub fn run_hermes_dispatch(
         Err(error) => return Ok(HermesDispatchJsResult { operation_id: String::new(), result: None, error: Some(error) }),
     };
     let request = HermesDispatchRequest { operation, params };
-    Ok(response_to_js(dispatcher.dispatch_request(&request)))
+    Ok(response_to_js(dispatcher.dispatch_request_with(&request, &call_options(timeout_ms))))
 }
