@@ -1,10 +1,6 @@
 [registries.crates-io]
 protocol = "sparse"
 
-# 本地 path patch —— 等 `Cargo.toml` 里的 `vos` Git 依赖取消注释后生效。
-[patch."https://github.com/voml/vos-language.git"]
-vos = { path = "E:/vmz 全栈开发/vos-language/projects/crates/vos" }
-
-# 当 `vos` crate 启用 `oak-vos` 依赖时，需要额外 patch oak-vos
-# [patch."https://github.com/yggdrasil-language/oaks.git"]
-# oak-vos = { path = "E:/vmz 全栈开发/oaks/examples/oak-vos" }
+# 本地 path patch —— 仅本地开发时启用；CI 从 registry 拉取 `vos` 不依赖此 patch。
+# [patch."https://github.com/voml/vos-language.git"]
+# vos = { path = "E:/vmz 全栈开发/vos-language/projects/crates/vos" }
