@@ -141,7 +141,6 @@ jobs:
         with:
           pattern: native-*
           path: dist/native-artifacts
-          if-no-artifacts: ignore
 
       - name: Normalize native artifact layout
         shell: bash
