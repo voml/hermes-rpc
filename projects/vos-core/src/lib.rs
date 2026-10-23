@@ -355,7 +355,7 @@ pub mod hermes {
             Ok(serde_json::to_string_pretty(self)?)
         }
 
-        /// 与 Hermes 支持的版本做基本校验。
+        /// 与 Hermes 支持的版本做基本校验 + span-vs-source 边界校验。
         fn validate(&self) -> QResult<()> {
             let e = &self.envelope;
             if e.stage != SUPPORTED_STAGE
@@ -381,8 +381,55 @@ pub mod hermes {
                     "invalid source_units state",
                 ));
             }
+            let source = &e.source_units[0].source;
+            for projection in &self.services {
+                validate_span(&projection.span, source, "service span")?;
+                if projection.name.is_empty() {
+                    return Err(HermesError::new(
+                        crate::error::ErrorKind::Validation,
+                        "service name cannot be empty",
+                    ));
+                }
+                if let Some(body) = &projection.body {
+                    validate_span(&body.span, source, "service body span")?;
+                    // 可选：校验 syntax slice 文本与 source 对应切片一致
+                    if let Some(slice_text) = source.get(body.span.clone()) {
+                        if slice_text != body.text.as_str() {
+                            return Err(HermesError::new(
+                                crate::error::ErrorKind::Validation,
+                                "service body syntax slice does not match source",
+                            ));
+                        }
+                    } else {
+                        return Err(HermesError::new(
+                            crate::error::ErrorKind::Validation,
+                            "service body span out of bounds",
+                        ));
+                    }
+                }
+            }
             Ok(())
         }
+    }
+
+    /// 公共 span 校验函数（同时服务于 Service 和将来的 Operation 校验）。
+    /// 检查：start <= end、end <= source.len()、start/end 落在 char boundary。
+    fn validate_span(
+        span: &Range<usize>,
+        source: &str,
+        label: &str,
+    ) -> QResult<()> {
+        if span.start > span.end
+            || span.end > source.len()
+            || !source.is_char_boundary(span.start)
+            || !source.is_char_boundary(span.end)
+        {
+            return Err(HermesError::new(
+                crate::error::ErrorKind::Validation,
+                format!("{label} out of bounds"),
+            ));
+        }
+        Ok(())
     }
 
     // --- Span 序列化 / 反序列化（与 vos-types 1:1 对齐） --------------------

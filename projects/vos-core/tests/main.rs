@@ -262,3 +262,121 @@ fn registry_rejects_duplicate_service_from_artifact() {
     assert_eq!(err.kind(), ErrorKind::Custom);
     assert!(err.message().contains("already registered"));
 }
+
+// --- span 校验测试 ------------------------------------------------------
+
+#[test]
+fn artifact_rejects_service_span_out_of_bounds() {
+    // source 只有 5 个字节 "hello"，但 span end=999
+    let bad = br#"{
+        "envelope": {
+            "stage": "service-syntax-projection",
+            "contractFormatVersion": "vos-service-contract-v0",
+            "languageVersion": "vos-language-v0",
+            "canonicalizationVersion": "vos-canonical-v0",
+            "schemaFingerprint": null,
+            "sourceUnits": [{"sourceUnitId": 0, "source": "hello"}]
+        },
+        "services": [
+            {"name": "A", "canonicalPath": ["A"], "span": {"start": 0, "end": 999}}
+        ]
+    }"#;
+
+    let err = HermesServiceArtifact::from_json(
+        std::str::from_utf8(bad).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Validation);
+    assert!(
+        err.message().contains("service span out of bounds"),
+        "got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn artifact_rejects_service_span_end_before_start_via_deserialize() {
+    // span start > end 在反序列化层就会拒绝
+    let bad = br#"{
+        "envelope": {
+            "stage": "service-syntax-projection",
+            "contractFormatVersion": "vos-service-contract-v0",
+            "languageVersion": "vos-language-v0",
+            "canonicalizationVersion": "vos-canonical-v0",
+            "schemaFingerprint": null,
+            "sourceUnits": [{"sourceUnitId": 0, "source": "hello"}]
+        },
+        "services": [
+            {"name": "A", "canonicalPath": ["A"], "span": {"start": 10, "end": 2}}
+        ]
+    }"#;
+
+    let err = HermesServiceArtifact::from_json(
+        std::str::from_utf8(bad).unwrap(),
+    )
+    .unwrap_err();
+    // deserialize_span 直接返回 serde 错误
+    assert!(
+        err.kind() == ErrorKind::Json || err.kind() == ErrorKind::Validation,
+        "unexpected error kind: {:?}",
+        err.kind()
+    );
+}
+
+#[test]
+fn artifact_rejects_body_span_out_of_bounds() {
+    // source 只有 "service A {}" (12 字节)，body span 越界
+    let bad = br#"{
+        "envelope": {
+            "stage": "service-syntax-projection",
+            "contractFormatVersion": "vos-service-contract-v0",
+            "languageVersion": "vos-language-v0",
+            "canonicalizationVersion": "vos-canonical-v0",
+            "schemaFingerprint": null,
+            "sourceUnits": [{"sourceUnitId": 0, "source": "service A {}"}]
+        },
+        "services": [
+            {"name": "A", "canonicalPath": ["A"], "span": {"start": 0, "end": 12},
+             "body": {"text": "body", "span": {"start": 20, "end": 50}}}
+        ]
+    }"#;
+
+    let err = HermesServiceArtifact::from_json(
+        std::str::from_utf8(bad).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Validation);
+    assert!(
+        err.message().contains("service body span out of bounds"),
+        "got: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn artifact_accepts_valid_char_boundary_spans() {
+    // 构造一个带多字节字符的 source，验证 span 必须落在 char boundary
+    // 使用普通字符串（不是 raw byte string）来避免编译警告
+    let source = "héllo wörld";
+    let json = format!(
+        r#"{{
+        "envelope": {{
+            "stage": "service-syntax-projection",
+            "contractFormatVersion": "vos-service-contract-v0",
+            "languageVersion": "vos-language-v0",
+            "canonicalizationVersion": "vos-canonical-v0",
+            "schemaFingerprint": null,
+            "sourceUnits": [{{"sourceUnitId": 0, "source": "{source}"}}]
+        }},
+        "services": [
+            {{"name": "A", "canonicalPath": ["A"], "span": {{"start": 0, "end": {len}}}}}
+        ]
+    }}"#,
+        source = source.replace('"', "\\\""),
+        len = source.len(),
+    );
+
+    let artifact = HermesServiceArtifact::from_json(&json)
+        .expect("char-boundary span should be accepted");
+    assert_eq!(artifact.services.len(), 1);
+}
