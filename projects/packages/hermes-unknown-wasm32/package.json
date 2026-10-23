@@ -1,6 +1,6 @@
 {
   "name": "@yydb/hermes-unknown-wasm32",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Hermes WASM fallback for browsers and WASI runtimes",
   "type": "module",
   "license": "MPL-2.0",
