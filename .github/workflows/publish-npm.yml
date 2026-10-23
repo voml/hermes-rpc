@@ -68,13 +68,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          out="dist/${{ matrix.short }}"
+          short="${{ matrix.short }}"
+          out="dist/${short}"
+          pkg_dir="projects/packages/hermes-${short}"
           mkdir -p "$out"
-          src="projects/hermes-napi"
-          node="$(find "$src" -maxdepth 1 -name '*.node' | head -n 1)"
+          node="$(find "$pkg_dir/lib" -maxdepth 1 -name '*.node' | head -n 1)"
           if [[ -z "$node" ]]; then
-            echo "missing native binary under $src" >&2
-            ls -la "$src" || true
+            echo "missing native binary under $pkg_dir/lib" >&2
+            ls -la "$pkg_dir/lib" || true
             exit 1
           fi
           cp "$node" "$out/$(basename "$node")"

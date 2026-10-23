@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const manifestPath = join(root, "projects/hermes-napi/Cargo.toml");
 const napiDir = join(root, "projects/hermes-napi");
 
 /** @type {Record<string, { packageDir: string; fileName: string }>} */
@@ -57,13 +56,13 @@ function findBuiltNodes(dir) {
 }
 
 execSync(
-    `pnpm exec napi build --platform --release --manifest-path "${manifestPath.replace(/\\/g, "/")}"`,
-    { cwd: root, stdio: "inherit", shell: true },
+    `pnpm exec napi build --platform --release --cargo-name hermes_napi`,
+    { cwd: napiDir, stdio: "inherit", shell: true },
 );
 
-const built = findBuiltNodes(napiDir);
+const built = findBuiltNodes(root);
 if (built.length === 0) {
-    throw new Error(`No .node artifacts under ${napiDir}`);
+    throw new Error(`No .node artifacts under ${root}`);
 }
 
 let copied = 0;
@@ -79,7 +78,8 @@ for (const name of built) {
         unlinkSync(join(libDir, existing));
     }
     const dest = join(libDir, mapping.fileName);
-    copyFileSync(join(napiDir, name), dest);
+    copyFileSync(join(root, name), dest);
+    unlinkSync(join(root, name)); // clean up napi output
     console.log(`copied ${name} -> ${dest}`);
     copied += 1;
 }

@@ -1,5 +1,5 @@
 [package]
-name = "hermes-napi"
+name = "hermes_napi"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

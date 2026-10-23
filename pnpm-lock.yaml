@@ -11,6 +11,9 @@ importers:
       '@doki-land/nifty':
         specifier: ^0.1.9
         version: 0.1.9
+      '@napi-rs/cli':
+        specifier: ^2.16
+        version: 2.18.4
 
   packages/hermes-skills: {}
 
@@ -79,6 +82,11 @@ packages:
     resolution: {integrity: sha512-GJFO9VQdmys3GzYIQy9u465bZ/cq05QUgxyPTk/m+TY0SS5EotKALceHdGIX+/nZI6OB1oUf2DkZ0zQGCDPcwQ==}
     hasBin: true
 
+  '@napi-rs/cli@2.18.4':
+    resolution: {integrity: sha512-SgJeA4df9DE2iAEpr3M2H0OKl/yjtg1BnRI5/JyowS71tUWhrfSu2LT0V3vlHET+g1hBVlrO60PmEXwUEKp8Mg==}
+    engines: {node: '>= 10'}
+    hasBin: true
+
   '@vmz/commander@0.2.8':
     resolution: {integrity: sha512-hDTOJGKHam1+GYnOJY8M0yqctrBt8RfdkvUVmkeu1LQVRyfWRZ8kqWnTdYcW8PoCWKP4DdDpcWJrbmI7rn68Bg==}
     engines: {node: '>=20'}
@@ -114,6 +122,8 @@ snapshots:
       '@doki-land/nifty-linux-arm64': 0.1.9
       '@doki-land/nifty-linux-x64': 0.1.9
       '@doki-land/nifty-win32-x64': 0.1.9
+
+  '@napi-rs/cli@2.18.4': {}
 
   '@vmz/commander@0.2.8': {}
 

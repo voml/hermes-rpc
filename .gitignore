@@ -13,6 +13,15 @@ time-travel.*
 node_modules/
 .cache/
 
+# N-API build artifacts
+index.js
+index.d.ts
+projects/packages/*/lib/*.node
+
+# Temp scripts
+_gen_otp.js
+_publish_000.ps1
+
 # Rust
 target/
 Cargo.lock
