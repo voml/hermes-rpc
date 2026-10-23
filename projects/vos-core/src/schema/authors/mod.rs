@@ -1,6 +1,14 @@
-use diagnostic_quick::{QError, QResult};
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::str::FromStr;
 
-use super::*;
+use email_address::EmailAddress;
+
+use crate::error::{HermesError, QResult};
+use crate::schema::objects::Object;
+use serde::{Deserialize, Serialize};
+
+use super::Project;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectAuthor {
@@ -34,10 +42,16 @@ impl Ord for ProjectAuthor {
 impl ProjectAuthor {
     pub fn new(name: &str, email: &str) -> QResult<Self> {
         if name.is_empty() {
-            Err(QError::syntax_error("Project author missing name"))?;
+            return Err(HermesError::new(
+                crate::error::ErrorKind::Validation,
+                "Project author missing name",
+            ));
         }
         if email.is_empty() {
-            Err(QError::syntax_error("Project author missing email"))?;
+            return Err(HermesError::new(
+                crate::error::ErrorKind::Validation,
+                "Project author missing email",
+            ));
         }
         let email = EmailAddress::from_str(email)?;
         Ok(Self { name: name.to_owned(), email, extra: Default::default() })

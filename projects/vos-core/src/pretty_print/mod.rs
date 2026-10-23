@@ -1,9 +1,8 @@
-use diagnostic_quick::Validation;
 use std::fmt::{Arguments, Display, Formatter, Write};
 
 use indenter::CodeFormatter;
 
-use crate::{Codegen, Environment, Project};
+use crate::{Codegen, Environment, Project, Validation};
 
 pub struct PrettyPrinter {}
 
@@ -11,7 +10,7 @@ impl Codegen for PrettyPrinter {
     type Output = String;
 
     fn generate(&self, project: &Project) -> Validation<Self::Output> {
-        Validation::Success { value: project.to_string(), diagnostics: vec![] }
+        Validation::ok(project.to_string())
     }
 }
 

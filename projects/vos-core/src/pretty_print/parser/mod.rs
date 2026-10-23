@@ -1,36 +1,12 @@
-use std::str::FromStr;
+//! 占位 parser：旧栈基于 `vos-ast` 的实现已冻结。
+//! Hermes 不再自建 VOS parser，改消费 `vos-language` 的 ServiceContract artifact。
+//! 这些方法暂时返回 `todo!()`，真实解析移到 `vos-language`。
 
-use vos_ast::{VosAST, VosStatement};
-use vos_error::{QResult, Validation, VosError};
-
+use crate::Validation;
 use crate::schema::Schema;
 
-struct ParseState {
-    error: Vec<VosError>,
-    warn: Vec<VosError>,
-}
-
 impl Schema {
-    pub fn parse(input: &str) -> Result<Validation<Self>, VosError> {
-        let mut state = ParseState { error: vec![], warn: vec![] };
-        match state.parse(input) {
-            Ok(_) => {}
-            Err(_) => {}
-        }
-        todo!()
-    }
-}
-
-impl ParseState {
-    fn parse(&mut self, i: &str) -> QResult {
-        let ast = VosAST::from_str(i)?;
-        for statement in ast.statements {
-            match statement {
-                VosStatement::Table(_) => {}
-                VosStatement::Object(_) => {}
-                VosStatement::Union(_) => {}
-            }
-        }
-        Ok(())
+    pub fn parse(_input: &str) -> Validation<Self> {
+        todo!("Hermes 不再自建 VOS parser，改消费 vos-language ServiceContract")
     }
 }

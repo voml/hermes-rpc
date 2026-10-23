@@ -1,7 +1,10 @@
 use super::*;
+use num_bigint::BigInt;
+use rust_decimal::Decimal;
 use voml_collection::Integer;
 
-#[cfg(feature = "json")]
+// Legacy feature: `json` was declared upstream but never wired in Cargo.toml.
+// The `json` submodule below is kept for reference.
 mod json;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

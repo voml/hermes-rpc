@@ -1,12 +1,12 @@
 [workspace]
-members = ["projects/*"]
-default-members = [
-    "projects/vos-core",
-#    "projects/vos-openapi",
-]
-exclude = [
-    "projects/.DS_Store",
-]
+resolver = "2"
+# 旧栈（`vos-ast` / `vos-for-rust` / `vos-cli` / `vos-openapi` / `vos-faker`）已冻结并移出 workspace。
+# Hermes 不再自建 parser/AST，改消费 `vos-language` 的 ServiceContract artifact。
+members = ["projects/vos-core"]
+
+# TODO(hermes): 等 `vos-language` 上游 `oak-vos` 迁到 stable 后，取消注释下一行。
+# vos = { path = "../vos-language/projects/crates/vos" }
+# 发布时切换为 Git：vos = { git = "https://github.com/voml/vos-language.git", branch = "dev" }
 
 [profile.release]
 lto = true

@@ -6,10 +6,9 @@ use std::{
     str::FromStr,
 };
 
-use diagnostic_quick::{
-    error_3rd::{BigInt, Decimal, EmailAddress, Url, Version},
-    QResult,
-};
+use semver::Version;
+use url::Url;
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
@@ -42,8 +41,8 @@ impl Default for Project {
         Self {
             kind: Default::default(),
             license: Default::default(),
-            edition: Version { major: 2020, minor: 0, patch: 0, pre: Default::default(), build: Default::default() },
-            version: Version { major: 0, minor: 0, patch: 0, pre: Default::default(), build: Default::default() },
+            edition: Version::new(2020, 0, 0),
+            version: Version::new(0, 0, 0),
             authors: Default::default(),
             description: Default::default(),
             environments: Default::default(),
