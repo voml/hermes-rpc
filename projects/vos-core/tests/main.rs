@@ -8,9 +8,9 @@
 //! 解析：`HermesServiceArtifact` 与上游 JSON 形状必须完全兼容。
 
 use vos_core::hermes::{
-    BTreeServiceRegistry, HermesMethodDescriptor, HermesServiceArtifact,
-    HermesServiceContract, HermesServiceLoader, HermesServiceRegistry,
-    JsonServiceLoader,
+    BTreeServiceRegistry, HermesMethodDescriptor, HermesOperationArtifact,
+    HermesOperationKind, HermesServiceArtifact, HermesServiceContract,
+    HermesServiceLoader, HermesServiceRegistry, JsonServiceLoader,
 };
 use vos_core::error::{ErrorKind, QError};
 
@@ -379,4 +379,200 @@ fn artifact_accepts_valid_char_boundary_spans() {
     let artifact = HermesServiceArtifact::from_json(&json)
         .expect("char-boundary span should be accepted");
     assert_eq!(artifact.services.len(), 1);
+}
+
+// --- HermesOperationArtifact fixture 测试 --------------------------------
+
+fn operation_fixture_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/operation_projection.basic.json")
+}
+
+#[test]
+fn load_operation_artifact_from_file_parses_fixture() {
+    let loader = JsonServiceLoader::default();
+    let artifact = loader
+        .load_operation_artifact_file(&operation_fixture_path())
+        .expect("should parse operation fixture");
+
+    assert_eq!(
+        artifact.envelope.stage,
+        "operation-syntax-projection"
+    );
+    assert_eq!(
+        artifact.envelope.contract_format_version,
+        "vos-operation-contract-v0"
+    );
+    assert_eq!(artifact.operations.len(), 3);
+}
+
+#[test]
+fn load_operation_artifact_parses_kind_name_and_span() {
+    let loader = JsonServiceLoader::default();
+    let bytes = std::fs::read(operation_fixture_path()).expect("fixture exists");
+    let artifact = loader
+        .load_operation_artifact(&bytes)
+        .expect("should parse from bytes");
+
+    let first = &artifact.operations[0];
+    assert_eq!(first.kind, HermesOperationKind::Query);
+    assert_eq!(first.name, "A");
+    assert_eq!(first.span, (0usize..12usize).into());
+    assert_eq!(first.operation_id, "op_1234abcd5678ef90");
+
+    let second = &artifact.operations[1];
+    assert_eq!(second.kind, HermesOperationKind::Udf);
+    assert_eq!(second.name, "B");
+    assert_eq!(second.span, (13usize..23usize).into());
+
+    let third = &artifact.operations[2];
+    assert_eq!(third.kind, HermesOperationKind::Micro);
+    assert_eq!(third.name, "C");
+    assert_eq!(third.span, (24usize..36usize).into());
+}
+
+#[test]
+fn operation_artifact_roundtrip_via_to_json_from_json() {
+    let loader = JsonServiceLoader::default();
+    let artifact = loader
+        .load_operation_artifact_file(&operation_fixture_path())
+        .expect("fixture parses");
+
+    let json = artifact.to_json().expect("serialize");
+    let roundtrip = HermesOperationArtifact::from_json(&json).expect("roundtrip");
+
+    assert_eq!(roundtrip, artifact);
+}
+
+#[test]
+fn operation_artifact_rejects_unknown_stage() {
+    let bad = br#"{
+        "envelope": {
+            "stage": "wrong-stage",
+            "contractFormatVersion": "vos-operation-contract-v0",
+            "languageVersion": "vos-language-v0",
+            "canonicalizationVersion": "vos-canonical-v0",
+            "schemaFingerprint": null,
+            "sourceUnits": [{"sourceUnitId": 0, "source": "query X():"}]
+        },
+        "operations": []
+    }"#;
+
+    let err = HermesOperationArtifact::from_json(
+        std::str::from_utf8(bad).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Validation);
+}
+
+#[test]
+fn operation_artifact_rejects_malformed_operation_id() {
+    let bad = br#"{
+        "envelope": {
+            "stage": "operation-syntax-projection",
+            "contractFormatVersion": "vos-operation-contract-v0",
+            "languageVersion": "vos-language-v0",
+            "canonicalizationVersion": "vos-canonical-v0",
+            "schemaFingerprint": null,
+            "sourceUnits": [{"sourceUnitId": 0, "source": "query X(): Y"}]
+        },
+        "operations": [
+            {"kind": "query", "name": "X", "identityKey": "query:X()->Y",
+             "operationId": "not_a_valid_id",
+             "parameters": [], "returnType": null,
+             "signature": null, "body": null,
+             "span": {"start": 0, "end": 12}}
+        ]
+    }"#;
+
+    let err = HermesOperationArtifact::from_json(
+        std::str::from_utf8(bad).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Validation);
+    assert!(err.message().contains("operation id is malformed"));
+}
+
+// --- Registry + OperationArtifact 组合测试 ------------------------------
+
+#[test]
+fn registry_register_operation_artifact_bulk_registers_all_operations() {
+    let loader = JsonServiceLoader::default();
+    let artifact = loader
+        .load_operation_artifact_file(&operation_fixture_path())
+        .expect("fixture parses");
+
+    let mut registry = BTreeServiceRegistry::default();
+    registry
+        .register_operation_artifact(&artifact)
+        .expect("bulk register ok");
+
+    assert_eq!(registry.all_operations().len(), 3);
+
+    // 按 operation_id 查找
+    let op_a = registry
+        .find_operation("op_1234abcd5678ef90")
+        .expect("operation A found");
+    assert_eq!(op_a.name, "A");
+    assert_eq!(op_a.kind, HermesOperationKind::Query);
+
+    // 按 name 查找
+    let op_b = registry
+        .find_operation_by_name("B")
+        .expect("operation B found by name");
+    assert_eq!(op_b.operation_id, "op_abcdef0123456789");
+    assert_eq!(op_b.kind, HermesOperationKind::Udf);
+
+    // unknown operation_id
+    assert!(registry.find_operation("op_nonexistent000").is_none());
+    assert!(registry.find_operation_by_name("NoSuchOp").is_none());
+}
+
+#[test]
+fn registry_rejects_duplicate_operation() {
+    let loader = JsonServiceLoader::default();
+    let artifact = loader
+        .load_operation_artifact_file(&operation_fixture_path())
+        .expect("fixture parses");
+
+    let mut registry = BTreeServiceRegistry::default();
+    registry.register_operation_artifact(&artifact).unwrap();
+
+    let err = registry.register_operation_artifact(&artifact).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Custom);
+    assert!(err.message().contains("already registered"));
+}
+
+// --- 端到端：同时加载 service + operation artifact ----------------------
+
+#[test]
+fn registry_loads_service_and_operation_artifacts_together() {
+    let loader = JsonServiceLoader::default();
+
+    let svc = loader
+        .load_artifact_file(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/service_projection.basic.json"),
+        )
+        .expect("service fixture parses");
+
+    let ops = loader
+        .load_operation_artifact_file(&operation_fixture_path())
+        .expect("operation fixture parses");
+
+    let mut registry = BTreeServiceRegistry::default();
+    registry.register_artifact(&svc).expect("services ok");
+    registry
+        .register_operation_artifact(&ops)
+        .expect("operations ok");
+
+    // services 存在
+    assert!(registry.find("hermes.rpc.FileService").is_some());
+    assert!(registry.find("hermes.rpc.Notify").is_some());
+    assert_eq!(registry.all().len(), 2);
+
+    // operations 独立维护
+    assert!(registry.find_operation("op_1234abcd5678ef90").is_some());
+    assert!(registry.find_operation_by_name("A").is_some());
+    assert_eq!(registry.all_operations().len(), 3);
 }
