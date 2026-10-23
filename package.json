@@ -8,5 +8,8 @@
         "push": "wee test && git push",
         "reset": "git reset Head~ --soft",
         "u": "cargo upgrade --workspace"
+    },
+    "devDependencies": {
+        "@doki-land/nifty": "^0.1.9"
     }
 }
