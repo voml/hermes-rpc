@@ -1,0 +1,14 @@
+# Copy to `config.toml` and replace `<your-path>` with your local absolute path.
+# CI resolves the Git dependency declared in `Cargo.toml`.
+#
+# Hermes currently does **not** compile-import the `vos` crate (路线 B ——
+# 直接消费 `ServiceProjectionArtifact` JSON，避免 `oak-vos` nightly 阻塞)。
+# 等上游 `vos-language` 迁到 stable 后，把 `Cargo.toml` 中的 `vos` 依赖
+# 取消注释，本 patch 立即生效。
+
+[patch."https://github.com/voml/vos-language.git"]
+vos = { path = "<your-path>/vos-language/projects/crates/vos" }
+
+# 当 `vos` crate 启用 `oak-vos` 依赖时，需要额外 patch oak-vos
+# [patch."https://github.com/yggdrasil-language/oaks.git"]
+# oak-vos = { path = "<your-path>/oaks/examples/oak-vos" }
