@@ -499,10 +499,12 @@ pub mod hermes {
 
     /// 从 artifact 加载服务描述的 trait。
     ///
-    /// 默认实现同时覆盖两种输入：
+    /// 默认实现同时覆盖三种输入：
     /// - `load` / `load_file` —— 解析旧的单服务手写 artifact（向后兼容）
     /// - `load_artifact` / `load_artifact_file` —— 解析 `vos-language` 产出的
     ///   `ServiceProjectionArtifact`（真实消费主链）
+    /// - `load_operation_artifact` / `load_operation_artifact_file` —— 解析
+    ///   `vos-language` 产出的 `OperationProjectionArtifact`
     pub trait HermesServiceLoader {
         /// 解析旧的单服务手写 artifact（JSON 形状是 `HermesServiceContract`）。
         fn load(&self, source: &[u8]) -> QResult<HermesServiceContract> {
@@ -529,14 +531,34 @@ pub mod hermes {
             let bytes = std::fs::read(path)?;
             self.load_artifact(&bytes)
         }
+
+        /// 解析 `vos-language` 产出的 operation projection artifact。
+        fn load_operation_artifact(
+            &self,
+            source: &[u8],
+        ) -> QResult<HermesOperationArtifact> {
+            HermesOperationArtifact::from_slice(source)
+        }
+
+        /// 从文件加载 operation projection artifact。
+        fn load_operation_artifact_file(
+            &self,
+            path: &std::path::Path,
+        ) -> QResult<HermesOperationArtifact> {
+            let bytes = std::fs::read(path)?;
+            self.load_operation_artifact(&bytes)
+        }
     }
 
     /// 注册与查找已加载服务描述的 trait。
     ///
     /// 默认实现同时支持：
     /// - `register` / `find` / `all` / `method` —— 旧单服务 contract 注册（向后兼容）
-    /// - `register_artifact` / `register_projection` —— 从 projection artifact
+    /// - `register_artifact` / `register_projection` —— 从 service projection artifact
     ///   批量注册 Hermes 内部可识别的服务描述
+    /// - `register_operation_artifact` / `register_operation` / `find_operation` ——
+    ///   从 operation projection artifact 注册独立维护的 operations registry
+    ///   （services 和 operations 分开存储）
     pub trait HermesServiceRegistry {
         /// 注册旧单服务 contract。
         fn register(&mut self, contract: HermesServiceContract) -> QResult<()> {
@@ -588,12 +610,49 @@ pub mod hermes {
             self.register(contract)
         }
 
-        /// 内部钩子：由具体实现（如 `BTreeServiceRegistry`）提供实际的
-        /// 存储逻辑，避免默认实现和 concrete impl 互相循环调用 `register`。
+        /// 从 `HermesOperationArtifact` 批量注册 operation。
+        ///
+        /// Operations 是顶层声明，不属于某个 service——Hermes 独立维护
+        /// operations registry（key = operation_id），与 services 分开存储。
+        fn register_operation_artifact(
+            &mut self,
+            artifact: &HermesOperationArtifact,
+        ) -> QResult<()> {
+            for operation in &artifact.operations {
+                self.register_operation(operation)?;
+            }
+            Ok(())
+        }
+
+        /// 注册单个 operation projection 到独立的 operations registry。
+        fn register_operation(
+            &mut self,
+            projection: &HermesOperationProjection,
+        ) -> QResult<()> {
+            self.insert_operation(projection.operation_id.clone(), projection.clone())
+        }
+
+        /// 按 operation_id 查找已注册的 operation。
+        fn find_operation(&self, operation_id: &str) -> Option<&HermesOperationProjection>;
+
+        /// 按 name 查找已注册的 operation（取第一个匹配）。
+        fn find_operation_by_name(&self, name: &str) -> Option<&HermesOperationProjection>;
+
+        /// 返回所有已注册 operation 的迭代。
+        fn all_operations(&self) -> Vec<&HermesOperationProjection>;
+
+        /// 内部钩子：由具体实现提供实际的服务存储逻辑。
         fn insert_contract(
             &mut self,
             name: String,
             contract: HermesServiceContract,
+        ) -> QResult<()>;
+
+        /// 内部钩子：由具体实现提供实际的 operation 存储逻辑。
+        fn insert_operation(
+            &mut self,
+            operation_id: String,
+            projection: HermesOperationProjection,
         ) -> QResult<()>;
     }
 
@@ -612,9 +671,14 @@ pub mod hermes {
     // -----------------------------------------------------------------------
 
     /// 基于 `BTreeMap` 的简单 registry，适合单机 Hermes 进程。
+    ///
+    /// 独立维护 services 和 operations 两个 map：
+    /// - services: key = 全限定服务名（canonical path join）
+    /// - operations: key = operation_id（"op_" + 16 hex）
     #[derive(Clone, Debug, Default)]
     pub struct BTreeServiceRegistry {
         services: std::collections::BTreeMap<String, HermesServiceContract>,
+        operations: std::collections::BTreeMap<String, HermesOperationProjection>,
     }
 
     impl BTreeServiceRegistry {
@@ -648,12 +712,48 @@ pub mod hermes {
             Ok(())
         }
 
+        fn insert_operation(
+            &mut self,
+            operation_id: String,
+            projection: HermesOperationProjection,
+        ) -> QResult<()> {
+            if self.operations.contains_key(&operation_id) {
+                return Err(HermesError::new(
+                    crate::error::ErrorKind::Custom,
+                    format!(
+                        "operation `{}` ({}) already registered",
+                        projection.name, operation_id
+                    ),
+                ));
+            }
+            self.operations.insert(operation_id, projection);
+            Ok(())
+        }
+
         fn find(&self, service_name: &str) -> Option<&HermesServiceContract> {
             self.services.get(service_name)
         }
 
         fn all(&self) -> Vec<&HermesServiceContract> {
             self.services.values().collect()
+        }
+
+        fn find_operation(
+            &self,
+            operation_id: &str,
+        ) -> Option<&HermesOperationProjection> {
+            self.operations.get(operation_id)
+        }
+
+        fn find_operation_by_name(
+            &self,
+            name: &str,
+        ) -> Option<&HermesOperationProjection> {
+            self.operations.values().find(|op| op.name == name)
+        }
+
+        fn all_operations(&self) -> Vec<&HermesOperationProjection> {
+            self.operations.values().collect()
         }
     }
 
