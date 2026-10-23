@@ -33,6 +33,7 @@ hermes-rpc/
 - `HermesServiceRegistry` / `BTreeServiceRegistry`——service 与 operation 分开存储，重复 identity 注册期拒绝
 - `HermesDispatcher` / `HermesOperationHandler`——按 `operation_id` 路由到用户 handler
 - `HermesDispatchRequest` / `HermesDispatchResponse`——请求 / 响应 envelope
+- `RpcError` / `RpcErrorCode`——稳定错误码族，wire 错误体为 `{"code": "...", "message": "..."}`
 
 ## 接入 `vos-language`
 
@@ -44,7 +45,7 @@ Hermes 不编译依赖 `vos` crate；它只消费 `vos-language` 产出的 JSON 
 cargo test --workspace
 ```
 
-39 个测试全部通过：18 个 projection 合同测试 + 21 个 runtime 测试。
+41 个测试全部通过：18 个 projection 合同测试 + 23 个 runtime 测试。
 
 ## 设计约束
 
