@@ -34,6 +34,7 @@ hermes-rpc/
 - `HermesDispatcher` / `HermesOperationHandler`——按 `operation_id` 路由到用户 handler
 - `HermesDispatchRequest` / `HermesDispatchResponse`——请求 / 响应 envelope
 - `RpcError` / `RpcErrorCode`——稳定错误码族，wire 错误体为 `{"code": "...", "message": "..."}`
+- `CallOptions` / `CancelToken` / `CallContext`——dispatch 生命周期：deadline、取消与在途并发上限
 
 ## 接入 `vos-language`
 
@@ -45,7 +46,7 @@ Hermes 不编译依赖 `vos` crate；它只消费 `vos-language` 产出的 JSON 
 cargo test --workspace
 ```
 
-41 个测试全部通过：18 个 projection 合同测试 + 23 个 runtime 测试。
+47 个测试全部通过：18 个 projection 合同测试 + 29 个 runtime 测试。
 
 ## 设计约束
 
