@@ -26,7 +26,7 @@ pub use self::{
         HermesOperationParameter, HermesOperationProjection, HermesServiceArtifact,
         HermesServiceLoader, HermesServiceRegistry, HermesSyntaxSliceContract,
         OPERATION_CONTRACT_FORMAT_VERSION, OPERATION_ID_PREFIX,
-        OPERATION_PROJECTION_STAGE,
+        OPERATION_PROJECTION_STAGE, SERVICE_ID_PREFIX, compute_service_id,
     },
     schema::{
         authors::ProjectAuthor,
@@ -337,6 +337,8 @@ pub mod hermes {
         pub name: String,
         /// Canonical namespace 限定的路径（source order）。
         pub canonical_path: Vec<String>,
+        /// 由 canonical path 与 name 派生的稳定服务身份（`svc_` + 16 hex）。
+        pub service_id: String,
         /// 可选的 body 源码切片（当前 syntax-projection 阶段不做 body lowering）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub body: Option<HermesSyntaxSlice>,
@@ -371,6 +373,38 @@ pub mod hermes {
     pub const CANONICALIZATION_VERSION: &str = "vos-canonical-v0";
     /// Hermes 当前能消费的 projection stage。
     pub const SUPPORTED_STAGE: &str = "service-syntax-projection";
+    /// 服务身份前缀，与上游 `vos-types` 的 `SERVICE_ID_PREFIX` 一致。
+    pub const SERVICE_ID_PREFIX: &str = "svc_";
+
+    /// 从 canonical path 与 name 派生稳定服务身份。
+    ///
+    /// 输出为 `svc_` + `sha256("path/name")` 前 8 字节的小写 hex，与上游
+    /// `vos_types::projection::compute_service_id` 完全一致。
+    pub fn compute_service_id(canonical_path: &[String], name: &str) -> String {
+        use sha2::{Digest, Sha256};
+
+        let path_key = canonical_path.join("/");
+        let mut hasher = Sha256::new();
+        hasher.update(path_key.as_bytes());
+        hasher.update(b"/");
+        hasher.update(name.as_bytes());
+        let digest = hasher.finalize();
+        let mut hex = String::with_capacity(SERVICE_ID_PREFIX.len() + 16);
+        hex.push_str(SERVICE_ID_PREFIX);
+        for byte in digest.iter().take(8) {
+            use std::fmt::Write;
+            let _ = write!(hex, "{byte:02x}");
+        }
+        hex
+    }
+
+    /// 校验 `service_id` 形状：`"svc_"` + 恰好 16 个 hex 数字。
+    fn is_valid_service_id(id: &str) -> bool {
+        match id.strip_prefix(SERVICE_ID_PREFIX) {
+            Some(tail) => tail.len() == 16 && tail.chars().all(|c| c.is_ascii_hexdigit()),
+            None => false,
+        }
+    }
 
     // --- HermesServiceArtifact 解析方法 -------------------------------------
 
@@ -427,6 +461,27 @@ pub mod hermes {
                     return Err(HermesError::new(
                         crate::error::ErrorKind::Validation,
                         "service name cannot be empty",
+                    ));
+                }
+                if !is_valid_service_id(&projection.service_id) {
+                    return Err(HermesError::new(
+                        crate::error::ErrorKind::Validation,
+                        format!(
+                            "service id is malformed: {}",
+                            projection.service_id
+                        ),
+                    ));
+                }
+                let expected =
+                    compute_service_id(&projection.canonical_path, &projection.name);
+                if projection.service_id != expected {
+                    return Err(HermesError::new(
+                        crate::error::ErrorKind::Validation,
+                        format!(
+                            "service id does not match canonical path and name: \
+                             expected {expected}, got {}",
+                            projection.service_id
+                        ),
                     ));
                 }
                 if let Some(body) = &projection.body {

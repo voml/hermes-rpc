@@ -16,11 +16,13 @@
     {
       "name": "FileService",
       "canonicalPath": ["hermes", "rpc", "FileService"],
+      "serviceId": "svc_fed285365413894d",
       "span": {"start": 0, "end": 55}
     },
     {
       "name": "Notify",
       "canonicalPath": ["hermes", "rpc", "Notify"],
+      "serviceId": "svc_ce632aef610efc9d",
       "span": {"start": 57, "end": 100}
     }
   ]

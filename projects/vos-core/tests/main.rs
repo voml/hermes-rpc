@@ -11,6 +11,7 @@ use vos_core::hermes::{
     BTreeServiceRegistry, HermesMethodDescriptor, HermesOperationArtifact,
     HermesOperationKind, HermesServiceArtifact, HermesServiceContract,
     HermesServiceLoader, HermesServiceRegistry, JsonServiceLoader,
+    compute_service_id,
 };
 use vos_core::error::{ErrorKind, QError};
 
@@ -206,7 +207,7 @@ fn artifact_version_mismatch_is_rejected() {
             "schemaFingerprint": null,
             "sourceUnits": [{"sourceUnitId": 0, "source": "service A {}"}]
         },
-        "services": [{"name": "A", "canonicalPath": ["A"], "span": {"start": 0, "end": 10}}]
+        "services": [{"name": "A", "canonicalPath": ["A"], "serviceId": "svc_9473795796e84dbb", "span": {"start": 0, "end": 10}}]
     }"#;
 
     let err = loader.load_artifact(bad).unwrap_err();
@@ -227,7 +228,7 @@ fn artifact_rejects_unknown_fields() {
             "sourceUnits": [{"sourceUnitId": 0, "source": "service A {}"}],
             "extraFieldShouldNotExist": 42
         },
-        "services": [{"name": "A", "canonicalPath": ["A"], "span": {"start": 0, "end": 10}}]
+        "services": [{"name": "A", "canonicalPath": ["A"], "serviceId": "svc_9473795796e84dbb", "span": {"start": 0, "end": 10}}]
     }"#;
 
     let err = loader.load_artifact(with_extra).unwrap_err();
@@ -278,7 +279,7 @@ fn artifact_rejects_service_span_out_of_bounds() {
             "sourceUnits": [{"sourceUnitId": 0, "source": "hello"}]
         },
         "services": [
-            {"name": "A", "canonicalPath": ["A"], "span": {"start": 0, "end": 999}}
+            {"name": "A", "canonicalPath": ["A"], "serviceId": "svc_9473795796e84dbb", "span": {"start": 0, "end": 999}}
         ]
     }"#;
 
@@ -307,7 +308,7 @@ fn artifact_rejects_service_span_end_before_start_via_deserialize() {
             "sourceUnits": [{"sourceUnitId": 0, "source": "hello"}]
         },
         "services": [
-            {"name": "A", "canonicalPath": ["A"], "span": {"start": 10, "end": 2}}
+            {"name": "A", "canonicalPath": ["A"], "serviceId": "svc_9473795796e84dbb", "span": {"start": 10, "end": 2}}
         ]
     }"#;
 
@@ -336,7 +337,7 @@ fn artifact_rejects_body_span_out_of_bounds() {
             "sourceUnits": [{"sourceUnitId": 0, "source": "service A {}"}]
         },
         "services": [
-            {"name": "A", "canonicalPath": ["A"], "span": {"start": 0, "end": 12},
+            {"name": "A", "canonicalPath": ["A"], "serviceId": "svc_9473795796e84dbb", "span": {"start": 0, "end": 12},
              "body": {"text": "body", "span": {"start": 20, "end": 50}}}
         ]
     }"#;
@@ -369,7 +370,7 @@ fn artifact_accepts_valid_char_boundary_spans() {
             "sourceUnits": [{{"sourceUnitId": 0, "source": "{source}"}}]
         }},
         "services": [
-            {{"name": "A", "canonicalPath": ["A"], "span": {{"start": 0, "end": {len}}}}}
+            {{"name": "A", "canonicalPath": ["A"], "serviceId": "svc_9473795796e84dbb", "span": {{"start": 0, "end": {len}}}}}
         ]
     }}"#,
         source = source.replace('"', "\\\""),
@@ -379,6 +380,83 @@ fn artifact_accepts_valid_char_boundary_spans() {
     let artifact = HermesServiceArtifact::from_json(&json)
         .expect("char-boundary span should be accepted");
     assert_eq!(artifact.services.len(), 1);
+}
+
+// --- 上游 service projection 合同样例 ------------------------------------
+
+fn upstream_service_fixture_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/service_projection.upstream_basic.json")
+}
+
+#[test]
+fn loads_upstream_service_projection_with_service_id() {
+    let loader = JsonServiceLoader::default();
+    let artifact = loader
+        .load_artifact_file(&upstream_service_fixture_path())
+        .expect("upstream service projection must decode");
+
+    assert_eq!(artifact.services.len(), 1);
+    let service = &artifact.services[0];
+    assert_eq!(service.name, "IdentityService");
+    assert_eq!(
+        service.canonical_path,
+        vec!["demo", "auth", "IdentityService"]
+    );
+    assert_eq!(service.service_id, "svc_3c7addc7a558968f");
+    assert_eq!(
+        service.service_id,
+        compute_service_id(&service.canonical_path, &service.name),
+        "service id 必须可由 canonical path 与 name 复算"
+    );
+}
+
+#[test]
+fn service_id_mismatch_is_rejected() {
+    let loader = JsonServiceLoader::default();
+    let bad = br#"{
+        "envelope": {
+            "stage": "service-syntax-projection",
+            "contractFormatVersion": "vos-service-contract-v0",
+            "languageVersion": "vos-language-v0",
+            "canonicalizationVersion": "vos-canonical-v0",
+            "sourceUnits": [{"sourceUnitId": 0, "source": "service A {}"}]
+        },
+        "services": [{
+            "name": "A",
+            "canonicalPath": ["A"],
+            "serviceId": "svc_0000000000000000",
+            "span": {"start": 0, "end": 10}
+        }]
+    }"#;
+
+    let err = loader.load_artifact(bad).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Validation);
+    assert!(err.message().contains("does not match canonical path"));
+}
+
+#[test]
+fn malformed_service_id_is_rejected() {
+    let loader = JsonServiceLoader::default();
+    let bad = br#"{
+        "envelope": {
+            "stage": "service-syntax-projection",
+            "contractFormatVersion": "vos-service-contract-v0",
+            "languageVersion": "vos-language-v0",
+            "canonicalizationVersion": "vos-canonical-v0",
+            "sourceUnits": [{"sourceUnitId": 0, "source": "service A {}"}]
+        },
+        "services": [{
+            "name": "A",
+            "canonicalPath": ["A"],
+            "serviceId": "svc_xyz",
+            "span": {"start": 0, "end": 10}
+        }]
+    }"#;
+
+    let err = loader.load_artifact(bad).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Validation);
+    assert!(err.message().contains("service id is malformed"));
 }
 
 // --- HermesOperationArtifact fixture 测试 --------------------------------
