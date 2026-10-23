@@ -91,6 +91,7 @@ jobs:
   publish:
     name: Publish packages
     needs: [build-native]
+    if: always()
     runs-on: ubuntu-latest
     environment: NPM_PUBLISH
     steps:
@@ -140,6 +141,7 @@ jobs:
         with:
           pattern: native-*
           path: dist/native-artifacts
+          if-no-artifacts: ignore
 
       - name: Normalize native artifact layout
         shell: bash
