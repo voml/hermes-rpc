@@ -20,11 +20,13 @@ pub use self::{
     },
     error::{HermesError, QError, QResult},
     hermes::{
-        HermesCanonicalType, HermesCanonicalTypeArgument, HermesOperationArtifact,
-        HermesOperationKind, HermesOperationParameter, HermesOperationProjection,
-        HermesServiceArtifact, HermesServiceLoader, HermesServiceRegistry,
-        HermesSyntaxSliceContract, OPERATION_CONTRACT_FORMAT_VERSION,
-        OPERATION_ID_PREFIX, OPERATION_PROJECTION_STAGE,
+        AddHandler, EchoHandler, HermesCanonicalType, HermesCanonicalTypeArgument,
+        HermesDispatcher, HermesDispatchRequest, HermesDispatchResponse,
+        HermesOperationArtifact, HermesOperationHandler, HermesOperationKind,
+        HermesOperationParameter, HermesOperationProjection, HermesServiceArtifact,
+        HermesServiceLoader, HermesServiceRegistry, HermesSyntaxSliceContract,
+        OPERATION_CONTRACT_FORMAT_VERSION, OPERATION_ID_PREFIX,
+        OPERATION_PROJECTION_STAGE,
     },
     schema::{
         authors::ProjectAuthor,
@@ -1036,6 +1038,307 @@ pub mod hermes {
                 }
             }
             Ok(())
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hermes RPC dispatch 原型
+    // -----------------------------------------------------------------------
+
+    /// 校验 `operation_id` 字符串形状：必须是 `"op_"` + 恰好 16 个小写/大写
+    /// hex 数字。
+    pub(crate) fn is_valid_operation_id(id: &str) -> bool {
+        if !id.starts_with(OPERATION_ID_PREFIX) {
+            return false;
+        }
+        let tail = &id[OPERATION_ID_PREFIX.len()..];
+        tail.len() == 16 && tail.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    /// 用户为每个 operation 注册的处理器 trait。
+    ///
+    /// Hermes dispatch 层是纯路由：handler 内部的业务逻辑完全由用户用 Rust
+    /// 写死，Hermes 只负责按 `operation_id` 找到合适的 handler 并调用。
+    /// VOS projection 阶段还没 lowering body 到可执行代码。
+    pub trait HermesOperationHandler: Send + Sync {
+        /// 执行对应 operation，返回 JSON 值或错误。
+        ///
+        /// `projection` 提供 operation 的静态声明信息（name / kind /
+        /// parameters 等），`params` 是调用方传过来的 JSON 参数对象。
+        fn execute(
+            &self,
+            projection: &HermesOperationProjection,
+            params: &serde_json::Value,
+        ) -> QResult<serde_json::Value>;
+    }
+
+    // --- HermesDispatcher --------------------------------------------------
+
+    /// Hermes RPC dispatch 核心：持有 registry + handler map，按
+    /// `operation_id` 路由到用户注册的 `HermesOperationHandler`。
+    #[derive(Default)]
+    pub struct HermesDispatcher {
+        registry: BTreeServiceRegistry,
+        handlers: std::collections::BTreeMap<String, Box<dyn HermesOperationHandler>>,
+    }
+
+    impl Clone for HermesDispatcher {
+        fn clone(&self) -> Self {
+            // handler map 里的 opaque trait object 不能 Clone，新实例保留
+            // 相同 registry 但 handler 列表为空——调用方可重新注册。
+            Self {
+                registry: self.registry.clone(),
+                handlers: std::collections::BTreeMap::new(),
+            }
+        }
+    }
+
+    impl std::fmt::Debug for HermesDispatcher {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("HermesDispatcher")
+                .field("registry", &self.registry)
+                .field(
+                    "handlers",
+                    &self.handlers.keys().collect::<Vec<_>>(),
+                )
+                .finish()
+        }
+    }
+
+    impl HermesDispatcher {
+        /// 构造一个空的 dispatcher。
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// 用已有 registry 构造 dispatcher。
+        pub fn with_registry(registry: BTreeServiceRegistry) -> Self {
+            Self { registry, handlers: std::collections::BTreeMap::new() }
+        }
+
+        /// 返回一个共享的 `JsonServiceLoader` 实例（无状态，调用零成本）。
+        pub fn loader(&self) -> JsonServiceLoader {
+            JsonServiceLoader::default()
+        }
+
+        /// 只读访问内部 registry。
+        pub fn registry(&self) -> &BTreeServiceRegistry {
+            &self.registry
+        }
+
+        /// 从 JSON 字符串解析 `HermesServiceArtifact` 并注册到内部 registry。
+        pub fn load_service_artifact(&mut self, json: &str) -> QResult<()> {
+            let artifact = HermesServiceArtifact::from_json(json)?;
+            self.registry.register_artifact(&artifact)
+        }
+
+        /// 从 JSON 字符串解析 `HermesOperationArtifact` 并注册到内部 registry。
+        pub fn load_operation_artifact(&mut self, json: &str) -> QResult<()> {
+            let artifact = HermesOperationArtifact::from_json(json)?;
+            self.registry.register_operation_artifact(&artifact)
+        }
+
+        /// 为 `operation_id` 注册一个 handler。
+        ///
+        /// 会先校验 `operation_id` 形状（`op_` + 16 hex），再校验 registry
+        /// 里确实存在这个 operation——提前暴露注册手误，防止 dispatch
+        /// 才发现。
+        pub fn register_handler(
+            &mut self,
+            operation_id: &str,
+            handler: Box<dyn HermesOperationHandler>,
+        ) -> QResult<()> {
+            if !is_valid_operation_id(operation_id) {
+                return Err(HermesError::new(
+                    crate::error::ErrorKind::Validation,
+                    format!("operation_id malformed: {}", operation_id),
+                ));
+            }
+            if self.registry.find_operation(operation_id).is_none() {
+                return Err(HermesError::new(
+                    crate::error::ErrorKind::Validation,
+                    format!(
+                        "operation `{}` not found in registry — cannot register handler",
+                        operation_id
+                    ),
+                ));
+            }
+            if self.handlers.contains_key(operation_id) {
+                return Err(HermesError::new(
+                    crate::error::ErrorKind::Custom,
+                    format!(
+                        "handler for operation `{}` already registered",
+                        operation_id
+                    ),
+                ));
+            }
+            self.handlers.insert(operation_id.to_string(), handler);
+            Ok(())
+        }
+
+        /// 按 `operation_id` 直接 dispatch。
+        ///
+        /// 找不到 handler 时返回 `ErrorKind::Custom` + `"handler not registered"`；
+        /// registry 里找不到这个 operation 时返回
+        /// `ErrorKind::Custom` + `"operation not found"`。
+        pub fn dispatch(
+            &self,
+            operation_id: &str,
+            params: &serde_json::Value,
+        ) -> QResult<serde_json::Value> {
+            let projection = self.registry.find_operation(operation_id).ok_or_else(|| {
+                HermesError::new(
+                    crate::error::ErrorKind::Custom,
+                    format!("operation not found: {}", operation_id),
+                )
+            })?;
+            let handler = self.handlers.get(operation_id).ok_or_else(|| {
+                HermesError::new(
+                    crate::error::ErrorKind::Custom,
+                    format!("handler not registered for operation {}", operation_id),
+                )
+            })?;
+            handler.execute(projection, params)
+        }
+
+        /// 按 operation 名称 dispatch。先在 registry 里按 `name` 找 operation，
+        /// 拿到 `operation_id` 后走 `dispatch`。
+        ///
+        /// 找不到时返回 `ErrorKind::Custom` + `"operation not found by name"`。
+        pub fn dispatch_by_name(
+            &self,
+            name: &str,
+            params: &serde_json::Value,
+        ) -> QResult<serde_json::Value> {
+            let projection = self
+                .registry
+                .find_operation_by_name(name)
+                .ok_or_else(|| {
+                    HermesError::new(
+                        crate::error::ErrorKind::Custom,
+                        format!("operation not found by name: {}", name),
+                    )
+                })?;
+            self.dispatch(&projection.operation_id, params)
+        }
+
+        /// 解析 `HermesDispatchRequest`：如果 `operation` 字段以 `op_` 开头
+        /// 视为 `operation_id`，否则视为 operation 名称。
+        pub fn dispatch_request(
+            &self,
+            request: &HermesDispatchRequest,
+        ) -> HermesDispatchResponse {
+            let is_id = is_valid_operation_id(&request.operation);
+            let (result, operation_id) = if is_id {
+                (
+                    self.dispatch(&request.operation, &request.params),
+                    request.operation.clone(),
+                )
+            } else {
+                match self.registry.find_operation_by_name(&request.operation) {
+                    Some(op) => (
+                        self.dispatch(&op.operation_id, &request.params),
+                        op.operation_id.clone(),
+                    ),
+                    None => (
+                        Err(HermesError::new(
+                            crate::error::ErrorKind::Custom,
+                            format!("operation not found by name: {}", request.operation),
+                        )),
+                        String::new(),
+                    ),
+                }
+            };
+            match result {
+                Ok(value) => HermesDispatchResponse {
+                    result: Some(value),
+                    error: None,
+                    operation_id,
+                },
+                Err(err) => HermesDispatchResponse {
+                    result: None,
+                    error: Some(err.message().to_string()),
+                    operation_id,
+                },
+            }
+        }
+    }
+
+    // --- Request / Response ------------------------------------------------
+
+    /// Hermes RPC 请求结构。实际 dispatch 也可以直接用原始字符串调用。
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    pub struct HermesDispatchRequest {
+        /// `operation_id`（`op_` 开头）或 operation 名称。
+        pub operation: String,
+        /// 参数 JSON 对象。
+        #[serde(default)]
+        pub params: serde_json::Value,
+    }
+
+    /// Hermes RPC 响应结构。result / error 二选一。
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct HermesDispatchResponse {
+        /// 成功时的返回值。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub result: Option<serde_json::Value>,
+        /// 失败时的错误消息。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub error: Option<String>,
+        /// 本次 dispatch 最终命中的 `operation_id`（方便客户端回查）。
+        pub operation_id: String,
+    }
+
+    // --- 内建 handler ------------------------------------------------------
+
+    /// 把 `params` 原样返回的测试 handler，用于 fixture 的 `query A(): U`。
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct EchoHandler;
+
+    impl HermesOperationHandler for EchoHandler {
+        fn execute(
+            &self,
+            _projection: &HermesOperationProjection,
+            params: &serde_json::Value,
+        ) -> QResult<serde_json::Value> {
+            Ok(params.clone())
+        }
+    }
+
+    /// 把 `params.a + params.b` 相加返回的测试 handler。
+    ///
+    /// 期望 JSON：`{"a": 3, "b": 4}` → 返回 `7`。若参数缺失或不是数值，返回
+    /// `ErrorKind::Validation`。
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct AddHandler;
+
+    impl HermesOperationHandler for AddHandler {
+        fn execute(
+            &self,
+            _projection: &HermesOperationProjection,
+            params: &serde_json::Value,
+        ) -> QResult<serde_json::Value> {
+            let a = params
+                .get("a")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| {
+                    HermesError::new(
+                        crate::error::ErrorKind::Validation,
+                        "missing or non-integer param `a`",
+                    )
+                })?;
+            let b = params
+                .get("b")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| {
+                    HermesError::new(
+                        crate::error::ErrorKind::Validation,
+                        "missing or non-integer param `b`",
+                    )
+                })?;
+            Ok(serde_json::Value::Number(serde_json::Number::from(a + b)))
         }
     }
 }

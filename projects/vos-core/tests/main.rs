@@ -576,3 +576,215 @@ fn registry_loads_service_and_operation_artifacts_together() {
     assert!(registry.find_operation_by_name("A").is_some());
     assert_eq!(registry.all_operations().len(), 3);
 }
+
+// =======================================================================
+// HermesDispatcher 端到端测试
+// =======================================================================
+
+fn service_fixture_json() -> String {
+    std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/service_projection.basic.json"),
+    )
+    .expect("service fixture exists")
+}
+
+fn operation_fixture_json() -> String {
+    std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/operation_projection.basic.json"),
+    )
+    .expect("operation fixture exists")
+}
+
+/// 预加载两个 fixture 并在 A、B 上分别挂 EchoHandler / AddHandler。
+fn dispatcher_with_handlers() -> vos_core::hermes::HermesDispatcher {
+    use vos_core::hermes::{AddHandler, EchoHandler, HermesDispatcher};
+
+    let mut dispatcher = HermesDispatcher::new();
+    dispatcher
+        .load_service_artifact(&service_fixture_json())
+        .expect("service fixture ok");
+    dispatcher
+        .load_operation_artifact(&operation_fixture_json())
+        .expect("operation fixture ok");
+
+    dispatcher
+        .register_handler(
+            "op_1234abcd5678ef90",
+            Box::new(EchoHandler),
+        )
+        .expect("register EchoHandler for A");
+    dispatcher
+        .register_handler(
+            "op_abcdef0123456789",
+            Box::new(AddHandler),
+        )
+        .expect("register AddHandler for B");
+
+    dispatcher
+}
+
+// --- 测试 1：按 operation_id dispatch 成功 --------------------------------
+
+#[test]
+fn dispatcher_dispatch_by_id_returns_handler_result() {
+    let dispatcher = dispatcher_with_handlers();
+
+    // EchoHandler: A 收到什么就回什么
+    let params = serde_json::json!({"hello": "world", "n": 42});
+    let got = dispatcher
+        .dispatch("op_1234abcd5678ef90", &params)
+        .expect("dispatch A ok");
+    assert_eq!(got, params);
+
+    // AddHandler: B 算 a + b
+    let got = dispatcher
+        .dispatch("op_abcdef0123456789", &serde_json::json!({"a": 3, "b": 4}))
+        .expect("dispatch B ok");
+    assert_eq!(got.as_i64(), Some(7));
+}
+
+// --- 测试 2：dispatch_by_name --------------------------------------------
+
+#[test]
+fn dispatcher_dispatch_by_name_routes_to_correct_operation() {
+    let dispatcher = dispatcher_with_handlers();
+
+    let got = dispatcher
+        .dispatch_by_name("A", &serde_json::json!({"ping": true}))
+        .expect("dispatch_by_name A ok");
+    assert_eq!(got, serde_json::json!({"ping": true}));
+
+    let got = dispatcher
+        .dispatch_by_name("B", &serde_json::json!({"a": 10, "b": 20}))
+        .expect("dispatch_by_name B ok");
+    assert_eq!(got.as_i64(), Some(30));
+}
+
+// --- 测试 3：handler not registered --------------------------------------
+
+#[test]
+fn dispatcher_dispatch_without_handler_returns_error() {
+    let dispatcher = dispatcher_with_handlers();
+
+    // fixture C（micro）没注册 handler
+    let err = dispatcher
+        .dispatch("op_deadbeefcafebabe", &serde_json::json!({}))
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Custom);
+    assert!(err.message().contains("handler not registered"));
+}
+
+// --- 测试 4：operation not found -----------------------------------------
+
+#[test]
+fn dispatcher_dispatch_unknown_operation_returns_error() {
+    let dispatcher = dispatcher_with_handlers();
+
+    let err = dispatcher
+        .dispatch("op_0000000000000000", &serde_json::json!({}))
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Custom);
+    assert!(err.message().contains("operation not found"));
+}
+
+#[test]
+fn dispatcher_dispatch_by_name_unknown_returns_error() {
+    let dispatcher = dispatcher_with_handlers();
+
+    let err = dispatcher
+        .dispatch_by_name("NoSuchOperation", &serde_json::json!({}))
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Custom);
+    assert!(err.message().contains("operation not found by name"));
+}
+
+// --- 测试 5：HermesDispatchRequest / Response JSON roundtrip -------------
+
+#[test]
+fn dispatch_request_response_roundtrip_and_success_path() {
+    use vos_core::hermes::{HermesDispatchRequest, HermesDispatchResponse};
+
+    let dispatcher = dispatcher_with_handlers();
+
+    // 5a：operation 是 operation_id → 直接路由
+    let req = HermesDispatchRequest {
+        operation: "op_1234abcd5678ef90".into(),
+        params: serde_json::json!({"key": "val"}),
+    };
+    let resp = dispatcher.dispatch_request(&req);
+    assert!(resp.result.is_some(), "success path should carry result");
+    assert!(resp.error.is_none());
+    assert_eq!(resp.operation_id, "op_1234abcd5678ef90");
+    assert_eq!(resp.result.as_ref().unwrap(), &req.params);
+
+    // roundtrip via JSON
+    let resp_json = serde_json::to_string(&resp).expect("serialize response");
+    let roundtrip: HermesDispatchResponse =
+        serde_json::from_str(&resp_json).expect("deserialize response");
+    assert_eq!(roundtrip, resp);
+
+    let req_json = serde_json::to_string(&req).expect("serialize request");
+    let roundtrip_req: HermesDispatchRequest =
+        serde_json::from_str(&req_json).expect("deserialize request");
+    assert_eq!(roundtrip_req, req);
+
+    // 5b：operation 是 name → dispatch_by_name 路径
+    let req_name = HermesDispatchRequest {
+        operation: "B".into(),
+        params: serde_json::json!({"a": 1, "b": 2}),
+    };
+    let resp_name = dispatcher.dispatch_request(&req_name);
+    assert!(resp_name.result.is_some());
+    assert_eq!(resp_name.operation_id, "op_abcdef0123456789");
+    assert_eq!(resp_name.result.as_ref().unwrap().as_i64(), Some(3));
+
+    // 5c：handler 未注册 → response 带 error 字段
+    let req_no_handler = HermesDispatchRequest {
+        operation: "op_deadbeefcafebabe".into(),
+        params: serde_json::json!({}),
+    };
+    let resp_no_handler = dispatcher.dispatch_request(&req_no_handler);
+    assert!(resp_no_handler.result.is_none());
+    assert!(resp_no_handler.error.is_some());
+    assert!(resp_no_handler
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("handler not registered"));
+    assert_eq!(resp_no_handler.operation_id, "op_deadbeefcafebabe");
+}
+
+// --- 补充：register_handler 防御逻辑 -------------------------------------
+
+#[test]
+fn register_handler_rejects_malformed_operation_id() {
+    let mut dispatcher = vos_core::hermes::HermesDispatcher::new();
+    dispatcher
+        .load_operation_artifact(&operation_fixture_json())
+        .unwrap();
+
+    let err = dispatcher
+        .register_handler("bad_id", Box::new(vos_core::hermes::EchoHandler))
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Validation);
+    assert!(err.message().contains("operation_id malformed"));
+}
+
+#[test]
+fn register_handler_rejects_nonexistent_operation() {
+    let mut dispatcher = vos_core::hermes::HermesDispatcher::new();
+    dispatcher
+        .load_operation_artifact(&operation_fixture_json())
+        .unwrap();
+
+    let err = dispatcher
+        .register_handler(
+            "op_0000000000000000",
+            Box::new(vos_core::hermes::EchoHandler),
+        )
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Validation);
+    assert!(err.message().contains("not found in registry"));
+}
