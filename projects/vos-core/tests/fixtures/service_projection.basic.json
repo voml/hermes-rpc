@@ -1,0 +1,27 @@
+{
+  "envelope": {
+    "stage": "service-syntax-projection",
+    "contractFormatVersion": "vos-service-contract-v0",
+    "languageVersion": "vos-language-v0",
+    "canonicalizationVersion": "vos-canonical-v0",
+    "schemaFingerprint": null,
+    "sourceUnits": [
+      {
+        "sourceUnitId": 0,
+        "source": "service FileService {\n  read_file(path: utf8): FileContent\n}\n\nservice Notify {\n  send(to: utf8, msg: utf8): bool\n}\n"
+      }
+    ]
+  },
+  "services": [
+    {
+      "name": "FileService",
+      "canonicalPath": ["hermes", "rpc", "FileService"],
+      "span": {"start": 0, "end": 55}
+    },
+    {
+      "name": "Notify",
+      "canonicalPath": ["hermes", "rpc", "Notify"],
+      "span": {"start": 57, "end": 100}
+    }
+  ]
+}
