@@ -17,7 +17,9 @@ pub use self::{
         SharedConstraint,
     },
     error::{HermesError, QError, QResult},
-    hermes::{HermesServiceLoader, HermesServiceRegistry},
+    hermes::{
+        HermesServiceArtifact, HermesServiceLoader, HermesServiceRegistry,
+    },
     schema::{
         authors::ProjectAuthor,
         document::{Document, DocumentKind},
@@ -224,21 +226,199 @@ impl<T: fmt::Display> fmt::Display for Validation<T> {
 // ---------------------------------------------------------------------------
 
 pub mod hermes {
-    //! Hermes 从 ServiceContract artifact 消费 VOS 服务描述的 trait。
+    //! Hermes 消费 VOS ServiceProjectionArtifact 的本地镜像与加载骨架。
     //!
-    //! 这是**占位骨架**。真实的 `ServiceContract` 类型由 `vos-language`
-    //! 仓库导出，Hermes 后续只做消费方，不做解析或 AST 构建。
+    //! 本模块**不编译依赖** `vos` crate：所有 `Hermes*` 结构体与上游
+    //! `vos-types::projection::ServiceProjectionArtifact` 保持 bit-exact 的
+    //! serde 对齐（camelCase 字段名 + `SpanWire` 序列化），因此 Hermes 可以
+    //! 直接解析 `vos-language` 产出的 JSON artifact 而无需其编译依赖。
+    //! 上游 `oak-vos` 迁到 stable 后，可切换为 `use vos::ServiceProjectionArtifact`。
+
+    use core::range::Range;
 
     use serde::{Deserialize, Serialize};
 
     use crate::error::{HermesError, QResult};
 
-    // --- 占位 ServiceContract 结构 ----------------------------------------
+    // -----------------------------------------------------------------------
+    // 与 vos-language `ServiceProjectionArtifact` 完全 serde 对齐的本地镜像
+    // -----------------------------------------------------------------------
 
-    /// Hermes 端占位的服务描述。
+    /// Hermes 从 `vos-language` 解析的 service projection artifact。
     ///
-    /// TODO(hermes): 用 `vos::ServiceContract` 替换。字段命名保持与将来
-    /// 的 VOS 正式 artifact 对齐。
+    /// 字段命名和 span 序列化必须与
+    /// `vos_types::projection::ServiceProjectionArtifact` **完全一致**
+    /// （camelCase + `{start, end}` 形状），否则无法解析上游 JSON。
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[serde(deny_unknown_fields)]
+    pub struct HermesServiceArtifact {
+        /// Artifact envelope 和来源元信息。
+        pub envelope: HermesContractEnvelope,
+        /// Source order 中投影出的所有服务。
+        pub services: Vec<HermesServiceProjection>,
+    }
+
+    /// Artifact 版本与来源 envelope，与上游 `ContractEnvelope` 对齐。
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[serde(deny_unknown_fields)]
+    pub struct HermesContractEnvelope {
+        /// Artifact 处理阶段（例如 `"service-syntax-projection"`）。
+        pub stage: String,
+        /// Artifact 格式版本。
+        pub contract_format_version: String,
+        /// VOS 语言合同版本。
+        pub language_version: String,
+        /// Canonicalization 规则版本。
+        pub canonicalization_version: String,
+        /// 可选 schema fingerprint。
+        pub schema_fingerprint: Option<String>,
+        /// Artifact 包含的 source units。
+        pub source_units: Vec<HermesSourceUnit>,
+    }
+
+    /// Artifact 携带的单个 source unit。
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[serde(deny_unknown_fields)]
+    pub struct HermesSourceUnit {
+        /// Artifact 内稳定的 source unit id。
+        pub source_unit_id: u32,
+        /// 精确的源文本。
+        pub source: String,
+    }
+
+    /// Hermes 端投影出的服务声明，与上游 `ServiceProjection` 对齐。
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[serde(deny_unknown_fields)]
+    pub struct HermesServiceProjection {
+        /// 服务名（原始声明名）。
+        pub name: String,
+        /// Canonical namespace 限定的路径（source order）。
+        pub canonical_path: Vec<String>,
+        /// 可选的 body 源码切片（当前 syntax-projection 阶段不做 body lowering）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub body: Option<HermesSyntaxSlice>,
+        /// 整个服务声明在源文本中的 span。
+        #[serde(
+            serialize_with = "serialize_span",
+            deserialize_with = "deserialize_span"
+        )]
+        pub span: Range<usize>,
+    }
+
+    /// 语法切片（body / signature / source）。
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[serde(deny_unknown_fields)]
+    pub struct HermesSyntaxSlice {
+        /// 精确的源文本。
+        pub text: String,
+        /// 在源中的字节 span。
+        #[serde(
+            serialize_with = "serialize_span",
+            deserialize_with = "deserialize_span"
+        )]
+        pub span: Range<usize>,
+    }
+
+    /// Artifact 支持的 contract format version。
+    pub const SERVICE_CONTRACT_FORMAT_VERSION: &str = "vos-service-contract-v0";
+    /// Artifact 支持的 language version。
+    pub const LANGUAGE_VERSION: &str = "vos-language-v0";
+    /// Artifact 支持的 canonicalization version。
+    pub const CANONICALIZATION_VERSION: &str = "vos-canonical-v0";
+    /// Hermes 当前能消费的 projection stage。
+    pub const SUPPORTED_STAGE: &str = "service-syntax-projection";
+
+    // --- HermesServiceArtifact 解析方法 -------------------------------------
+
+    impl HermesServiceArtifact {
+        /// 从 JSON 字符串解析并做版本校验。
+        pub fn from_json(input: &str) -> QResult<Self> {
+            let artifact: Self = serde_json::from_str(input)?;
+            artifact.validate()?;
+            Ok(artifact)
+        }
+
+        /// 从字节切片解析并做版本校验。
+        pub fn from_slice(source: &[u8]) -> QResult<Self> {
+            let artifact: Self = serde_json::from_slice(source)?;
+            artifact.validate()?;
+            Ok(artifact)
+        }
+
+        /// 序列化为 pretty-printed JSON。
+        pub fn to_json(&self) -> QResult<String> {
+            Ok(serde_json::to_string_pretty(self)?)
+        }
+
+        /// 与 Hermes 支持的版本做基本校验。
+        fn validate(&self) -> QResult<()> {
+            let e = &self.envelope;
+            if e.stage != SUPPORTED_STAGE
+                || e.contract_format_version != SERVICE_CONTRACT_FORMAT_VERSION
+                || e.language_version != LANGUAGE_VERSION
+                || e.canonicalization_version != CANONICALIZATION_VERSION
+            {
+                return Err(HermesError::new(
+                    crate::error::ErrorKind::Validation,
+                    format!(
+                        "unsupported service artifact version \
+                         (stage={}, contractFormatVersion={}, languageVersion={}, canonicalizationVersion={})",
+                        e.stage,
+                        e.contract_format_version,
+                        e.language_version,
+                        e.canonicalization_version,
+                    ),
+                ));
+            }
+            if e.source_units.len() != 1 || e.source_units[0].source_unit_id != 0 {
+                return Err(HermesError::new(
+                    crate::error::ErrorKind::Validation,
+                    "invalid source_units state",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    // --- Span 序列化 / 反序列化（与 vos-types 1:1 对齐） --------------------
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct SpanWire {
+        start: usize,
+        end: usize,
+    }
+
+    fn serialize_span<S: serde::Serializer>(
+        span: &Range<usize>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        SpanWire { start: span.start, end: span.end }.serialize(serializer)
+    }
+
+    fn deserialize_span<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Range<usize>, D::Error> {
+        let span = SpanWire::deserialize(deserializer)?;
+        if span.start > span.end {
+            return Err(serde::de::Error::custom("span start is after span end"));
+        }
+        Ok((span.start..span.end).into())
+    }
+
+    // -----------------------------------------------------------------------
+    // 旧占位 ServiceContract 结构 —— 向后兼容（单服务手写 artifact）
+    // -----------------------------------------------------------------------
+
+    /// Hermes 端占位的服务描述（单服务手写 artifact 场景）。
+    ///
+    /// 真实消费主链是 `HermesServiceArtifact`（与上游 `ServiceProjectionArtifact`
+    /// 对齐）。本结构体仅用于旧 mock 测试与手工构造的单服务 JSON。
     #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
     pub struct HermesServiceContract {
         /// 服务的全局唯一名称（例如 `"hermes.rpc.FileService"`）。
@@ -262,28 +442,56 @@ pub mod hermes {
         pub docs: String,
     }
 
-    // --- Loader & Registry ------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Loader / Registry —— 同时支持旧单服务 artifact 和新 projection artifact
+    // -----------------------------------------------------------------------
 
-    /// 从 artifact（通常是 JSON 文件或字节流）加载 ServiceContract。
+    /// 从 artifact 加载服务描述的 trait。
     ///
-    /// 实现可以是：
-    /// - 直接 `serde_json::from_slice`（读取 vos-language 生成的 artifact）
-    /// - 从 `include_bytes!` 嵌入的静态资源加载
-    /// - 远端拉取（Hermes server 场景）
+    /// 默认实现同时覆盖两种输入：
+    /// - `load` / `load_file` —— 解析旧的单服务手写 artifact（向后兼容）
+    /// - `load_artifact` / `load_artifact_file` —— 解析 `vos-language` 产出的
+    ///   `ServiceProjectionArtifact`（真实消费主链）
     pub trait HermesServiceLoader {
-        fn load(&self, source: &[u8]) -> QResult<HermesServiceContract>;
+        /// 解析旧的单服务手写 artifact（JSON 形状是 `HermesServiceContract`）。
+        fn load(&self, source: &[u8]) -> QResult<HermesServiceContract> {
+            let contract: HermesServiceContract = serde_json::from_slice(source)?;
+            Ok(contract)
+        }
 
+        /// 从文件加载旧的单服务 artifact。
         fn load_file(&self, path: &std::path::Path) -> QResult<HermesServiceContract> {
             let bytes = std::fs::read(path)?;
             self.load(&bytes)
         }
+
+        /// 解析 `vos-language` 产出的 service projection artifact。
+        fn load_artifact(&self, source: &[u8]) -> QResult<HermesServiceArtifact> {
+            HermesServiceArtifact::from_slice(source)
+        }
+
+        /// 从文件加载 service projection artifact。
+        fn load_artifact_file(
+            &self,
+            path: &std::path::Path,
+        ) -> QResult<HermesServiceArtifact> {
+            let bytes = std::fs::read(path)?;
+            self.load_artifact(&bytes)
+        }
     }
 
-    /// 注册与查找已加载的 ServiceContract。
+    /// 注册与查找已加载服务描述的 trait。
     ///
-    /// Hermes runtime 用它把服务描述和具体的 method handler 绑定。
+    /// 默认实现同时支持：
+    /// - `register` / `find` / `all` / `method` —— 旧单服务 contract 注册（向后兼容）
+    /// - `register_artifact` / `register_projection` —— 从 projection artifact
+    ///   批量注册 Hermes 内部可识别的服务描述
     pub trait HermesServiceRegistry {
-        fn register(&mut self, contract: HermesServiceContract) -> QResult<()>;
+        /// 注册旧单服务 contract。
+        fn register(&mut self, contract: HermesServiceContract) -> QResult<()> {
+            let name = contract.service_name.clone();
+            self.insert_contract(name, contract)
+        }
 
         fn find(&self, service_name: &str) -> Option<&HermesServiceContract>;
 
@@ -298,22 +506,59 @@ pub mod hermes {
                 c.methods.iter().find(|m| m.name == method_name)
             })
         }
+
+        /// 从 `HermesServiceArtifact` 批量注册内部服务描述。
+        fn register_artifact(&mut self, artifact: &HermesServiceArtifact) -> QResult<()> {
+            for projection in &artifact.services {
+                self.register_projection(projection)?;
+            }
+            Ok(())
+        }
+
+        /// 把单个 `HermesServiceProjection` 注册为内部可识别的服务描述。
+        ///
+        /// 当前 projection 阶段（`service-syntax-projection`）尚未携带 methods，
+        /// 因此转换得到的 `HermesServiceContract.methods` 为空。将来更低
+        /// 阶段的 projection 可以覆盖这个默认行为。
+        fn register_projection(
+            &mut self,
+            projection: &HermesServiceProjection,
+        ) -> QResult<()> {
+            let service_name = if !projection.canonical_path.is_empty() {
+                projection.canonical_path.join(".")
+            } else {
+                projection.name.clone()
+            };
+            let contract = HermesServiceContract {
+                service_name,
+                methods: vec![],
+                revision: None,
+            };
+            self.register(contract)
+        }
+
+        /// 内部钩子：由具体实现（如 `BTreeServiceRegistry`）提供实际的
+        /// 存储逻辑，避免默认实现和 concrete impl 互相循环调用 `register`。
+        fn insert_contract(
+            &mut self,
+            name: String,
+            contract: HermesServiceContract,
+        ) -> QResult<()>;
     }
 
-    // --- 内建 JSON Loader -------------------------------------------------
+    // -----------------------------------------------------------------------
+    // 内建 JSON Loader
+    // -----------------------------------------------------------------------
 
     /// 用 `serde_json` 解析 artifact 的默认 loader。
     #[derive(Clone, Debug, Default)]
     pub struct JsonServiceLoader;
 
-    impl HermesServiceLoader for JsonServiceLoader {
-        fn load(&self, source: &[u8]) -> QResult<HermesServiceContract> {
-            let contract: HermesServiceContract = serde_json::from_slice(source)?;
-            Ok(contract)
-        }
-    }
+    impl HermesServiceLoader for JsonServiceLoader {}
 
-    // --- 内建 HashMap Registry --------------------------------------------
+    // -----------------------------------------------------------------------
+    // 内建 BTreeMap Registry
+    // -----------------------------------------------------------------------
 
     /// 基于 `BTreeMap` 的简单 registry，适合单机 Hermes 进程。
     #[derive(Clone, Debug, Default)]
@@ -321,9 +566,27 @@ pub mod hermes {
         services: std::collections::BTreeMap<String, HermesServiceContract>,
     }
 
+    impl BTreeServiceRegistry {
+        /// 按全限定名（canonical path join）或原始名查找 projection artifact 中的服务。
+        pub fn find_by_name_or_canonical(
+            &self,
+            projection: &HermesServiceProjection,
+        ) -> Option<&HermesServiceContract> {
+            let canonical = if !projection.canonical_path.is_empty() {
+                projection.canonical_path.join(".")
+            } else {
+                projection.name.clone()
+            };
+            self.find(&canonical).or_else(|| self.find(&projection.name))
+        }
+    }
+
     impl HermesServiceRegistry for BTreeServiceRegistry {
-        fn register(&mut self, contract: HermesServiceContract) -> QResult<()> {
-            let name = contract.service_name.clone();
+        fn insert_contract(
+            &mut self,
+            name: String,
+            contract: HermesServiceContract,
+        ) -> QResult<()> {
             if self.services.contains_key(&name) {
                 return Err(HermesError::new(
                     crate::error::ErrorKind::Custom,
