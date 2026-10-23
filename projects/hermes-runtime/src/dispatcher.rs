@@ -6,23 +6,22 @@
 
 use std::collections::BTreeMap;
 
-use vos_core::{
-    error::{ErrorKind, HermesError, QResult},
-    projection::{HermesOperationProjection, OPERATION_ID_PREFIX},
-};
+use vos_core::projection::{HermesOperationArtifact, HermesOperationProjection, HermesServiceArtifact, OPERATION_ID_PREFIX};
 
 use crate::{
+    error::{RpcError, RpcErrorCode, RpcResult},
+    loader::JsonServiceLoader,
     registry::{BTreeServiceRegistry, HermesServiceRegistry},
     wire::{HermesDispatchRequest, HermesDispatchResponse},
 };
 
 /// 用户为每个 operation 注册的处理器 trait。
 pub trait HermesOperationHandler: Send + Sync {
-    /// 执行对应 operation，返回 JSON 值或错误。
+    /// 执行对应 operation，返回 JSON 值或结构化错误。
     ///
     /// `projection` 提供 operation 的静态声明信息（name / kind /
     /// parameters 等），`params` 是调用方传过来的 JSON 参数对象。
-    fn execute(&self, projection: &HermesOperationProjection, params: &serde_json::Value) -> QResult<serde_json::Value>;
+    fn execute(&self, projection: &HermesOperationProjection, params: &serde_json::Value) -> RpcResult<serde_json::Value>;
 }
 
 /// 校验 `operation_id` 字符串形状：必须是 `"op_"` + 恰好 16 个 hex 数字。
@@ -71,8 +70,8 @@ impl HermesDispatcher {
     }
 
     /// 返回一个共享的 `JsonServiceLoader` 实例（无状态，调用零成本）。
-    pub fn loader(&self) -> crate::loader::JsonServiceLoader {
-        crate::loader::JsonServiceLoader::default()
+    pub fn loader(&self) -> JsonServiceLoader {
+        JsonServiceLoader::default()
     }
 
     /// 只读访问内部 registry。
@@ -81,14 +80,14 @@ impl HermesDispatcher {
     }
 
     /// 从 JSON 字符串解析 `HermesServiceArtifact` 并注册到内部 registry。
-    pub fn load_service_artifact(&mut self, json: &str) -> QResult<()> {
-        let artifact = vos_core::projection::HermesServiceArtifact::from_json(json)?;
+    pub fn load_service_artifact(&mut self, json: &str) -> RpcResult<()> {
+        let artifact = HermesServiceArtifact::from_json(json).map_err(RpcError::from_artifact)?;
         self.registry.register_artifact(&artifact)
     }
 
     /// 从 JSON 字符串解析 `HermesOperationArtifact` 并注册到内部 registry。
-    pub fn load_operation_artifact(&mut self, json: &str) -> QResult<()> {
-        let artifact = vos_core::projection::HermesOperationArtifact::from_json(json)?;
+    pub fn load_operation_artifact(&mut self, json: &str) -> RpcResult<()> {
+        let artifact = HermesOperationArtifact::from_json(json).map_err(RpcError::from_artifact)?;
         self.registry.register_operation_artifact(&artifact)
     }
 
@@ -97,20 +96,20 @@ impl HermesDispatcher {
     /// 会先校验 `operation_id` 形状（`op_` + 16 hex），再校验 registry
     /// 里确实存在这个 operation——提前暴露注册手误，防止 dispatch
     /// 才发现。
-    pub fn register_handler(&mut self, operation_id: &str, handler: Box<dyn HermesOperationHandler>) -> QResult<()> {
+    pub fn register_handler(&mut self, operation_id: &str, handler: Box<dyn HermesOperationHandler>) -> RpcResult<()> {
         if !is_valid_operation_id(operation_id) {
-            return Err(HermesError::new(ErrorKind::Validation, format!("operation_id malformed: {}", operation_id)));
+            return Err(RpcError::new(RpcErrorCode::InvalidRequest, format!("operation_id malformed: {operation_id}")));
         }
         if self.registry.find_operation(operation_id).is_none() {
-            return Err(HermesError::new(
-                ErrorKind::Validation,
-                format!("operation `{}` not found in registry — cannot register handler", operation_id),
+            return Err(RpcError::new(
+                RpcErrorCode::UnknownOperation,
+                format!("operation `{operation_id}` not found in registry — cannot register handler"),
             ));
         }
         if self.handlers.contains_key(operation_id) {
-            return Err(HermesError::new(
-                ErrorKind::Custom,
-                format!("handler for operation `{}` already registered", operation_id),
+            return Err(RpcError::new(
+                RpcErrorCode::DuplicateRegistration,
+                format!("handler for operation `{operation_id}` already registered"),
             ));
         }
         self.handlers.insert(operation_id.to_string(), handler);
@@ -119,29 +118,26 @@ impl HermesDispatcher {
 
     /// 按 `operation_id` 直接 dispatch。
     ///
-    /// 找不到 handler 时返回 `ErrorKind::Custom` + `"handler not registered"`；
-    /// registry 里找不到这个 operation 时返回
-    /// `ErrorKind::Custom` + `"operation not found"`。
-    pub fn dispatch(&self, operation_id: &str, params: &serde_json::Value) -> QResult<serde_json::Value> {
+    /// 未知 operation 返回 `unknown-operation`，未绑定 handler 返回
+    /// `handler-not-registered`，handler 自身的错误原样透传。
+    pub fn dispatch(&self, operation_id: &str, params: &serde_json::Value) -> RpcResult<serde_json::Value> {
         let projection = self
             .registry
             .find_operation(operation_id)
-            .ok_or_else(|| HermesError::new(ErrorKind::Custom, format!("operation not found: {}", operation_id)))?;
+            .ok_or_else(|| RpcError::new(RpcErrorCode::UnknownOperation, format!("operation not found: {operation_id}")))?;
         let handler = self.handlers.get(operation_id).ok_or_else(|| {
-            HermesError::new(ErrorKind::Custom, format!("handler not registered for operation {}", operation_id))
+            RpcError::new(RpcErrorCode::HandlerNotRegistered, format!("handler not registered for operation {operation_id}"))
         })?;
         handler.execute(projection, params)
     }
 
     /// 按 operation 名称 dispatch。先在 registry 里按 `name` 找 operation，
     /// 拿到 `operation_id` 后走 `dispatch`。
-    ///
-    /// 找不到时返回 `ErrorKind::Custom` + `"operation not found by name"`。
-    pub fn dispatch_by_name(&self, name: &str, params: &serde_json::Value) -> QResult<serde_json::Value> {
+    pub fn dispatch_by_name(&self, name: &str, params: &serde_json::Value) -> RpcResult<serde_json::Value> {
         let projection = self
             .registry
             .find_operation_by_name(name)
-            .ok_or_else(|| HermesError::new(ErrorKind::Custom, format!("operation not found by name: {}", name)))?;
+            .ok_or_else(|| RpcError::new(RpcErrorCode::UnknownOperation, format!("operation not found by name: {name}")))?;
         self.dispatch(&projection.operation_id, params)
     }
 
@@ -156,14 +152,17 @@ impl HermesDispatcher {
             match self.registry.find_operation_by_name(&request.operation) {
                 Some(op) => (self.dispatch(&op.operation_id, &request.params), op.operation_id.clone()),
                 None => (
-                    Err(HermesError::new(ErrorKind::Custom, format!("operation not found by name: {}", request.operation))),
+                    Err(RpcError::new(
+                        RpcErrorCode::UnknownOperation,
+                        format!("operation not found by name: {}", request.operation),
+                    )),
                     String::new(),
                 ),
             }
         };
         match result {
             Ok(value) => HermesDispatchResponse { result: Some(value), error: None, operation_id },
-            Err(err) => HermesDispatchResponse { result: None, error: Some(err.message().to_string()), operation_id },
+            Err(err) => HermesDispatchResponse { result: None, error: Some(err), operation_id },
         }
     }
 }

@@ -6,17 +6,19 @@
 
 use std::collections::BTreeMap;
 
-use vos_core::{
-    error::{ErrorKind, HermesError, QResult},
-    projection::{HermesOperationArtifact, HermesOperationProjection, HermesServiceArtifact, HermesServiceProjection},
+use vos_core::projection::{
+    HermesOperationArtifact, HermesOperationProjection, HermesServiceArtifact, HermesServiceProjection,
 };
 
-use crate::contract::HermesServiceContract;
+use crate::{
+    contract::{HermesMethodDescriptor, HermesServiceContract},
+    error::{RpcError, RpcErrorCode, RpcResult},
+};
 
 /// 注册与查找已加载服务描述的 trait。
 pub trait HermesServiceRegistry {
     /// 注册服务描述。
-    fn register(&mut self, contract: HermesServiceContract) -> QResult<()> {
+    fn register(&mut self, contract: HermesServiceContract) -> RpcResult<()> {
         let name = contract.service_name.clone();
         self.insert_contract(name, contract)
     }
@@ -28,12 +30,12 @@ pub trait HermesServiceRegistry {
     fn all(&self) -> Vec<&HermesServiceContract>;
 
     /// 按服务名 + 方法名查找已注册的方法。
-    fn method(&self, service_name: &str, method_name: &str) -> Option<&crate::contract::HermesMethodDescriptor> {
+    fn method(&self, service_name: &str, method_name: &str) -> Option<&HermesMethodDescriptor> {
         self.find(service_name).and_then(|c| c.methods.iter().find(|m| m.name == method_name))
     }
 
     /// 从 `HermesServiceArtifact` 批量注册服务描述。
-    fn register_artifact(&mut self, artifact: &HermesServiceArtifact) -> QResult<()> {
+    fn register_artifact(&mut self, artifact: &HermesServiceArtifact) -> RpcResult<()> {
         for projection in &artifact.services {
             self.register_projection(projection)?;
         }
@@ -45,7 +47,7 @@ pub trait HermesServiceRegistry {
     /// 当前 projection 阶段（`service-syntax-projection`）尚未携带 methods，
     /// 因此转换得到的 `HermesServiceContract.methods` 为空。将来更低阶段的
     /// projection 可以覆盖这个默认行为。
-    fn register_projection(&mut self, projection: &HermesServiceProjection) -> QResult<()> {
+    fn register_projection(&mut self, projection: &HermesServiceProjection) -> RpcResult<()> {
         let service_name =
             if !projection.canonical_path.is_empty() { projection.canonical_path.join(".") } else { projection.name.clone() };
         let contract = HermesServiceContract { service_name, methods: vec![], revision: None };
@@ -56,7 +58,7 @@ pub trait HermesServiceRegistry {
     ///
     /// Operations 是顶层声明，不属于某个 service——Hermes 独立维护
     /// operations registry（key = operation_id），与 services 分开存储。
-    fn register_operation_artifact(&mut self, artifact: &HermesOperationArtifact) -> QResult<()> {
+    fn register_operation_artifact(&mut self, artifact: &HermesOperationArtifact) -> RpcResult<()> {
         for operation in &artifact.operations {
             self.register_operation(operation)?;
         }
@@ -64,7 +66,7 @@ pub trait HermesServiceRegistry {
     }
 
     /// 注册单个 operation projection 到独立的 operations registry。
-    fn register_operation(&mut self, projection: &HermesOperationProjection) -> QResult<()> {
+    fn register_operation(&mut self, projection: &HermesOperationProjection) -> RpcResult<()> {
         self.insert_operation(projection.operation_id.clone(), projection.clone())
     }
 
@@ -78,10 +80,10 @@ pub trait HermesServiceRegistry {
     fn all_operations(&self) -> Vec<&HermesOperationProjection>;
 
     /// 内部钩子：由具体实现提供实际的服务存储逻辑。
-    fn insert_contract(&mut self, name: String, contract: HermesServiceContract) -> QResult<()>;
+    fn insert_contract(&mut self, name: String, contract: HermesServiceContract) -> RpcResult<()>;
 
     /// 内部钩子：由具体实现提供实际的 operation 存储逻辑。
-    fn insert_operation(&mut self, operation_id: String, projection: HermesOperationProjection) -> QResult<()>;
+    fn insert_operation(&mut self, operation_id: String, projection: HermesOperationProjection) -> RpcResult<()>;
 }
 
 /// 基于 `BTreeMap` 的简单 registry，适合单机 Hermes 进程。
@@ -105,19 +107,19 @@ impl BTreeServiceRegistry {
 }
 
 impl HermesServiceRegistry for BTreeServiceRegistry {
-    fn insert_contract(&mut self, name: String, contract: HermesServiceContract) -> QResult<()> {
+    fn insert_contract(&mut self, name: String, contract: HermesServiceContract) -> RpcResult<()> {
         if self.services.contains_key(&name) {
-            return Err(HermesError::new(ErrorKind::Custom, format!("service `{}` already registered", name)));
+            return Err(RpcError::new(RpcErrorCode::DuplicateRegistration, format!("service `{name}` already registered")));
         }
         self.services.insert(name, contract);
         Ok(())
     }
 
-    fn insert_operation(&mut self, operation_id: String, projection: HermesOperationProjection) -> QResult<()> {
+    fn insert_operation(&mut self, operation_id: String, projection: HermesOperationProjection) -> RpcResult<()> {
         if self.operations.contains_key(&operation_id) {
-            return Err(HermesError::new(
-                ErrorKind::Custom,
-                format!("operation `{}` ({}) already registered", projection.name, operation_id),
+            return Err(RpcError::new(
+                RpcErrorCode::DuplicateRegistration,
+                format!("operation `{}` ({operation_id}) already registered", projection.name),
             ));
         }
         self.operations.insert(operation_id, projection);

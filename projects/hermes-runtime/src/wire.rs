@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::RpcError;
+
 /// Hermes RPC 请求结构。实际 dispatch 也可以直接用原始字符串调用。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -20,9 +22,9 @@ pub struct HermesDispatchResponse {
     /// 成功时的返回值。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
-    /// 失败时的错误消息。
+    /// 失败时的结构化错误（带稳定错误码）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub error: Option<RpcError>,
     /// 本次 dispatch 最终命中的 `operation_id`（方便客户端回查）。
     pub operation_id: String,
 }

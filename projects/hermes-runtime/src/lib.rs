@@ -11,6 +11,7 @@
 
 pub mod contract;
 pub mod dispatcher;
+pub mod error;
 pub mod handlers;
 pub mod loader;
 pub mod registry;
@@ -19,9 +20,10 @@ pub mod wire;
 pub use self::{
     contract::{HermesMethodDescriptor, HermesServiceContract},
     dispatcher::{HermesDispatcher, HermesOperationHandler},
+    error::{RpcError, RpcErrorCode, RpcResult},
     handlers::{AddHandler, EchoHandler},
     loader::{HermesServiceLoader, JsonServiceLoader},
     registry::{BTreeServiceRegistry, HermesServiceRegistry},
     wire::{HermesDispatchRequest, HermesDispatchResponse},
 };
-pub use vos_core::{error, projection};
+pub use vos_core::projection;

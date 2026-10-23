@@ -6,7 +6,7 @@
 
 use hermes_runtime::{
     AddHandler, BTreeServiceRegistry, EchoHandler, HermesDispatcher, HermesMethodDescriptor, HermesServiceContract,
-    HermesServiceLoader, HermesServiceRegistry, JsonServiceLoader, error::ErrorKind, projection::HermesOperationKind,
+    HermesServiceLoader, HermesServiceRegistry, JsonServiceLoader, error::RpcErrorCode, projection::HermesOperationKind,
 };
 
 /// 最小 service artifact：两个服务，均不带 methods。
@@ -118,7 +118,7 @@ fn json_loader_parses_valid_artifact() {
 fn json_loader_rejects_garbage() {
     let loader = JsonServiceLoader::default();
     let err = loader.load(b"not json").unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Json);
+    assert_eq!(err.code(), RpcErrorCode::ArtifactCorrupt);
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn registry_rejects_duplicate_service_name() {
     let mut registry = BTreeServiceRegistry::default();
     registry.register(contract.clone()).unwrap();
     let err = registry.register(contract).unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Custom);
+    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
     assert!(err.message().contains("already registered"));
 }
 
@@ -220,7 +220,7 @@ fn registry_rejects_duplicate_service_from_artifact() {
 
     // 再注册一次 —— 所有 service_name 都已存在
     let err = registry.register_artifact(&artifact).unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Custom);
+    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
     assert!(err.message().contains("already registered"));
 }
 
@@ -258,7 +258,7 @@ fn registry_rejects_duplicate_operation() {
     registry.register_operation_artifact(&artifact).unwrap();
 
     let err = registry.register_operation_artifact(&artifact).unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Custom);
+    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
     assert!(err.message().contains("already registered"));
 }
 
@@ -333,7 +333,7 @@ fn dispatcher_dispatch_without_handler_returns_error() {
 
     // fixture C（micro）没注册 handler
     let err = dispatcher.dispatch("op_deadbeefcafebabe", &serde_json::json!({})).unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Custom);
+    assert_eq!(err.code(), RpcErrorCode::HandlerNotRegistered);
     assert!(err.message().contains("handler not registered"));
 }
 
@@ -342,7 +342,7 @@ fn dispatcher_dispatch_unknown_operation_returns_error() {
     let dispatcher = dispatcher_with_handlers();
 
     let err = dispatcher.dispatch("op_0000000000000000", &serde_json::json!({})).unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Custom);
+    assert_eq!(err.code(), RpcErrorCode::UnknownOperation);
     assert!(err.message().contains("operation not found"));
 }
 
@@ -351,7 +351,7 @@ fn dispatcher_dispatch_by_name_unknown_returns_error() {
     let dispatcher = dispatcher_with_handlers();
 
     let err = dispatcher.dispatch_by_name("NoSuchOperation", &serde_json::json!({})).unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Custom);
+    assert_eq!(err.code(), RpcErrorCode::UnknownOperation);
     assert!(err.message().contains("operation not found by name"));
 }
 
@@ -385,13 +385,18 @@ fn dispatch_request_response_roundtrip_and_success_path() {
     assert_eq!(resp_name.operation_id, "op_abcdef0123456789");
     assert_eq!(resp_name.result.as_ref().unwrap().as_i64(), Some(3));
 
-    // handler 未注册 → response 带 error 字段
+    // handler 未注册 → response 带结构化 error 字段
     let req_no_handler = HermesDispatchRequest { operation: "op_deadbeefcafebabe".into(), params: serde_json::json!({}) };
     let resp_no_handler = dispatcher.dispatch_request(&req_no_handler);
     assert!(resp_no_handler.result.is_none());
-    assert!(resp_no_handler.error.is_some());
-    assert!(resp_no_handler.error.as_ref().unwrap().contains("handler not registered"));
+    let wire_error = resp_no_handler.error.as_ref().expect("error should be present");
+    assert_eq!(wire_error.code(), RpcErrorCode::HandlerNotRegistered);
+    assert!(wire_error.message().contains("handler not registered"));
     assert_eq!(resp_no_handler.operation_id, "op_deadbeefcafebabe");
+
+    // wire 错误体形状：`{"code": "...", "message": "..."}`
+    let wire_json = serde_json::to_value(&resp_no_handler).expect("serialize response");
+    assert_eq!(wire_json["error"]["code"], serde_json::json!("handler-not-registered"));
 }
 
 // --- register_handler 防御逻辑 -------------------------------------------
@@ -402,7 +407,7 @@ fn register_handler_rejects_malformed_operation_id() {
     dispatcher.load_operation_artifact(OPERATION_ARTIFACT).unwrap();
 
     let err = dispatcher.register_handler("bad_id", Box::new(EchoHandler)).unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Validation);
+    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
     assert!(err.message().contains("operation_id malformed"));
 }
 
@@ -412,6 +417,34 @@ fn register_handler_rejects_nonexistent_operation() {
     dispatcher.load_operation_artifact(OPERATION_ARTIFACT).unwrap();
 
     let err = dispatcher.register_handler("op_0000000000000000", Box::new(EchoHandler)).unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Validation);
+    assert_eq!(err.code(), RpcErrorCode::UnknownOperation);
     assert!(err.message().contains("not found in registry"));
+}
+
+// --- handler 内部错误映射 -------------------------------------------------
+
+#[test]
+fn add_handler_reports_invalid_request_for_missing_param() {
+    let dispatcher = dispatcher_with_handlers();
+
+    let err = dispatcher.dispatch("op_abcdef0123456789", &serde_json::json!({"a": 1})).unwrap_err();
+    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
+    assert!(err.message().contains("param `b`"));
+}
+
+#[test]
+fn rpc_error_code_wire_names_are_kebab_case() {
+    let codes = [
+        (RpcErrorCode::ArtifactCorrupt, "artifact-corrupt"),
+        (RpcErrorCode::UnknownOperation, "unknown-operation"),
+        (RpcErrorCode::HandlerNotRegistered, "handler-not-registered"),
+        (RpcErrorCode::DuplicateRegistration, "duplicate-registration"),
+        (RpcErrorCode::InvalidRequest, "invalid-request"),
+        (RpcErrorCode::HandlerFailed, "handler-failed"),
+        (RpcErrorCode::Internal, "internal"),
+    ];
+    for (code, expected) in codes {
+        assert_eq!(code.as_str(), expected);
+        assert_eq!(serde_json::to_string(&code).unwrap(), format!("\"{expected}\""));
+    }
 }
