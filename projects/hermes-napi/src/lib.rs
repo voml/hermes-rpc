@@ -5,13 +5,10 @@
 //! with their own handler impls); this layer only handles artifact loading
 //! and dispatch routing.
 
+use hermes_runtime::{HermesDispatchRequest, HermesDispatchResponse, HermesDispatcher, error::HermesError};
 use napi::{Error as NapiError, Status};
 use napi_derive::napi;
 use serde_json::Value;
-use vos_core::error::HermesError;
-use vos_core::hermes::{
-    HermesDispatchRequest, HermesDispatchResponse, HermesDispatcher,
-};
 
 /// Hermes N-API version.
 #[napi]
@@ -32,11 +29,7 @@ pub struct HermesDispatchJsResult {
 }
 
 fn response_to_js(resp: HermesDispatchResponse) -> HermesDispatchJsResult {
-    HermesDispatchJsResult {
-        operation_id: resp.operation_id,
-        result: resp.result.map(|v| v.to_string()),
-        error: resp.error,
-    }
+    HermesDispatchJsResult { operation_id: resp.operation_id, result: resp.result.map(|v| v.to_string()), error: resp.error }
 }
 
 fn map_hermes<T>(res: Result<T, HermesError>, ctx: &str) -> std::result::Result<T, NapiError> {
@@ -54,33 +47,19 @@ impl HermesDispatcherHandle {
     /// Create a new empty dispatcher.
     #[napi(constructor)]
     pub fn new() -> Self {
-        Self {
-            inner: HermesDispatcher::new(),
-        }
+        Self { inner: HermesDispatcher::new() }
     }
 
     /// Load a `HermesServiceArtifact` JSON string into the dispatcher registry.
     #[napi]
-    pub fn load_service_artifact(
-        &mut self,
-        json: String,
-    ) -> std::result::Result<(), NapiError> {
-        map_hermes(
-            self.inner.load_service_artifact(&json),
-            "load_service_artifact",
-        )
+    pub fn load_service_artifact(&mut self, json: String) -> std::result::Result<(), NapiError> {
+        map_hermes(self.inner.load_service_artifact(&json), "load_service_artifact")
     }
 
     /// Load a `HermesOperationArtifact` JSON string into the dispatcher registry.
     #[napi]
-    pub fn load_operation_artifact(
-        &mut self,
-        json: String,
-    ) -> std::result::Result<(), NapiError> {
-        map_hermes(
-            self.inner.load_operation_artifact(&json),
-            "load_operation_artifact",
-        )
+    pub fn load_operation_artifact(&mut self, json: String) -> std::result::Result<(), NapiError> {
+        map_hermes(self.inner.load_operation_artifact(&json), "load_operation_artifact")
     }
 
     /// Dispatch by operation id (`op_<hex>`) or by name.
@@ -89,16 +68,9 @@ impl HermesDispatcherHandle {
     /// Error state is encoded in the response (see [`HermesDispatchJsResult`]);
     /// a missing handler returns `Result` variant with an `error` field.
     #[napi]
-    pub fn dispatch(
-        &self,
-        operation: String,
-        params_json: String,
-    ) -> HermesDispatchJsResult {
+    pub fn dispatch(&self, operation: String, params_json: String) -> HermesDispatchJsResult {
         let params: Value = serde_json::from_str(&params_json).unwrap_or_default();
-        let request = HermesDispatchRequest {
-            operation,
-            params,
-        };
+        let request = HermesDispatchRequest { operation, params };
         response_to_js(self.inner.dispatch_request(&request))
     }
 }
@@ -120,14 +92,8 @@ pub fn run_hermes_dispatch(
     params_json: String,
 ) -> std::result::Result<HermesDispatchJsResult, NapiError> {
     let mut dispatcher = HermesDispatcher::new();
-    map_hermes(
-        dispatcher.load_service_artifact(&service_artifact_json),
-        "load_service_artifact",
-    )?;
-    map_hermes(
-        dispatcher.load_operation_artifact(&operation_artifact_json),
-        "load_operation_artifact",
-    )?;
+    map_hermes(dispatcher.load_service_artifact(&service_artifact_json), "load_service_artifact")?;
+    map_hermes(dispatcher.load_operation_artifact(&operation_artifact_json), "load_operation_artifact")?;
     let params: Value = serde_json::from_str(&params_json).unwrap_or_default();
     let request = HermesDispatchRequest { operation, params };
     Ok(response_to_js(dispatcher.dispatch_request(&request)))

@@ -1,9 +1,11 @@
 [workspace]
 resolver = "2"
-# Hermes workspace: Rust core (`vos-core`) + N-API binding (`hermes-napi`).
+# Hermes workspace: VOS language host (`vos-core`), RPC domain runtime
+# (`hermes-runtime`) and the N-API binding (`hermes-napi`).
 # 旧栈（`vos-ast` / `vos-for-rust` / `vos-cli` / `vos-openapi` / `vos-faker`）已冻结并移出 workspace。
 members = [
     "projects/vos-core",
+    "projects/hermes-runtime",
     "projects/hermes-napi",
 ]
 

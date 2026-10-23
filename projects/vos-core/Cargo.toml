@@ -25,9 +25,9 @@ sha2 = "0.10"
 url = { version = "2", features = ["serde"] }
 email_address = "0.2"
 
-# Hermes 消费的 VOS ServiceContract artifact 来自 `vos-language`。
-# TODO(hermes): 等 `vos` crate 导出 `ServiceContract` 后，将本 crate 内的
-# 本地占位 trait（`HermesServiceContract` 等）替换为从 `vos` 导入的正式类型。
+# VOS artifact 合同镜像（service / operation projection）与上游 `vos-language`
+# 的 `vos-types` 保持 serde 对齐，因此本 crate 不需要编译依赖 `vos` crate。
+# RPC 领域逻辑（loader / registry / dispatch）在 `hermes-runtime`。
 
 [dev-dependencies]
 

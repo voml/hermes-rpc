@@ -12,7 +12,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-vos-core = { path = "../vos-core" }
+hermes-runtime = { path = "../hermes-runtime" }
 napi = { workspace = true }
 napi-derive = { workspace = true }
 serde = { workspace = true }

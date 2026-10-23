@@ -6,47 +6,45 @@ Hermes 是 VMZ 体系中的 RPC 协议宿主与服务消费端。
 
 **旧栈已冻结。** 2026-10-23 之前的 `vos-ast` / `vos-for-rust` / `vos-openapi` / `vos-cli` / `vos-faker` 原型已从 workspace 移除——它们依赖的 `diagnostic-quick 0.4.0` 与当前 `diagnostic` crate 不兼容，且 Hermes 已决定**不再自建 parser/AST**。
 
-**新主链**：Hermes 消费 [`vos-language`](https://github.com/voml/vos-language) 产出的 `ServiceContract` artifact（JSON 描述），按 artifact 中的 service/method descriptor 注册并路由 RPC 调用。
+**新主链**：Hermes 消费 [`vos-language`](https://github.com/voml/vos-language) 产出的 service / operation projection artifact（JSON），按 artifact 中的稳定 identity 注册并路由 RPC 调用。
 
 ## 工作区结构
 
 ```
 hermes-rpc/
-├── Cargo.toml                # workspace 入口，只含 projects/vos-core
+├── Cargo.toml                # workspace 入口
 ├── projects/
-│   └── vos-core/             # Hermes 核心类型 + ServiceContract 消费接口
-└── projects/vos-*            # ← 冻结的旧原型，已移出 workspace，不再编译
+│   ├── vos-core/             # VOS 语言层 + VOS artifact 合同镜像
+│   ├── hermes-runtime/       # RPC 领域运行时：loader / registry / dispatch
+│   ├── hermes-napi/          # 唯一 N-API 边界
+│   └── vos-*/                # ← 冻结的旧原型，已移出 workspace，不再编译
 ```
 
 ## `vos-core` 提供
 
-- **类型层**：`Project`、`Schema`、`Endpoint`、各种 constraint（`IntegerConstraint` / `DecimalConstraint` / `StringConstraint` …）——保留 VOS schema 的建模能力。
-- **错误层**：`HermesError` / `QResult<T>` / `QError` —— 替代了已废弃的 `diagnostic-quick`。
-- **Hermes 接口骨架**：
-  - `HermesServiceLoader` —— 从 artifact JSON 加载 service 描述（内建 `JsonServiceLoader`）
-  - `HermesServiceRegistry` —— 注册/查找 service（内建 `BTreeServiceRegistry`）
-  - `HermesServiceContract` / `HermesMethodDescriptor` —— 占位的 ServiceContract 结构
-  - `Validation<T>` —— 带诊断的结果类型
+- **语言层**：`Project`、`Schema`、`Endpoint`、各种 constraint（`IntegerConstraint` / `DecimalConstraint` / `StringConstraint` …）——VOS schema 的建模能力。
+- **artifact 合同镜像**：`HermesServiceArtifact` / `HermesOperationArtifact`，与上游 `vos-types` 的 serde 形状对齐（camelCase、`{start, end}` span、`deny_unknown_fields`），并复算校验 `svc_` / `op_` identity。
+- **错误层**：`HermesError` / `QResult<T>` / `QError`——替代了已废弃的 `diagnostic-quick`。
+- **`Validation<T>`**——带诊断的结果类型。
+
+## `hermes-runtime` 提供
+
+- `HermesServiceLoader` / `JsonServiceLoader`——artifact 解析与版本校验入口
+- `HermesServiceRegistry` / `BTreeServiceRegistry`——service 与 operation 分开存储，重复 identity 注册期拒绝
+- `HermesDispatcher` / `HermesOperationHandler`——按 `operation_id` 路由到用户 handler
+- `HermesDispatchRequest` / `HermesDispatchResponse`——请求 / 响应 envelope
 
 ## 接入 `vos-language`
 
-`HermesServiceContract` 是本地占位结构，真实类型由 `vos-language` 仓库导出。等上游 `vos` crate 暴露正式的 `ServiceContract` 后，只需在 `Cargo.toml` 添加：
-
-```toml
-[dependencies]
-vos = { git = "https://github.com/voml/vos-language.git", branch = "dev" }
-```
-
-然后把本 crate 内的占位 trait 替换为 `use vos::ServiceContract`。当前上游 `oak-vos` 仍在 nightly 上，待其迁到 stable 后接通。
+Hermes 不编译依赖 `vos` crate；它只消费 `vos-language` 产出的 JSON artifact。字段命名、span 形状与 identity 规则以上游 `vos-types` 为准，镜像改动必须以上游真实 fixture 做解码测试。
 
 ## 验证
 
 ```bash
-cargo check --workspace
 cargo test --workspace
 ```
 
-7 个 mock 单元测试全部通过，覆盖 loader 解析、registry 注册/查找/去重、QError 构造器。
+39 个测试全部通过：18 个 projection 合同测试 + 21 个 runtime 测试。
 
 ## 设计约束
 
