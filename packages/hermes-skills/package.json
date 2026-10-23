@@ -1,5 +1,5 @@
 {
-    "name": "@game-gpt/hermes-skills",
+    "name": "@yydb/hermes-skills",
     "version": "0.1.0",
     "description": "Agent Skills for planning and reviewing Hermes RPC contracts and runtime boundaries",
     "private": false,
