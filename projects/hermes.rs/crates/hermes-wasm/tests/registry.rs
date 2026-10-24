@@ -107,6 +107,15 @@ fn encodes_dispatch_response() {
 }
 
 #[test]
+fn rejects_dispatch_response_with_unknown_field() {
+    let result = parse(&encode_dispatch_response(
+        r#"{"result":1,"operationId":"op_0123456789abcdef","extra":true}"#,
+    ));
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["code"], "invalid-request");
+}
+
+#[test]
 fn rejects_dispatch_response_with_both_result_and_error() {
     let result = parse(&encode_dispatch_response(
         r#"{"result":1,"error":{"code":"internal","message":"boom"},"operationId":"op_0123456789abcdef"}"#,

@@ -27,6 +27,15 @@ fn encode_json<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_else(|err| failure_json("internal", err.to_string()))
 }
 
+fn reject_unknown_keys(json: &str, allowed: &[&str]) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|err| err.to_string())?;
+    let object = value.as_object().ok_or_else(|| "expected a JSON object".to_string())?;
+    match object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        Some(key) => Err(format!("unknown field `{key}`")),
+        None => Ok(()),
+    }
+}
+
 /// Hermes WASM binding version (Cargo package version).
 #[wasm_bindgen(js_name = hermesVersion)]
 pub fn hermes_version() -> String {
@@ -67,6 +76,9 @@ pub fn decode_dispatch_request(json: &str) -> String {
 /// Decode a `HermesDispatchResponse` and return its canonical JSON form.
 #[wasm_bindgen(js_name = encodeDispatchResponse)]
 pub fn encode_dispatch_response(json: &str) -> String {
+    if let Err(message) = reject_unknown_keys(json, &["operationId", "result", "error"]) {
+        return failure_json("invalid-request", message);
+    }
     let response: HermesDispatchResponse = match serde_json::from_str(json) {
         Ok(response) => response,
         Err(err) => return failure_json("invalid-request", err.to_string()),
