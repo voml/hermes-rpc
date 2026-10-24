@@ -4,6 +4,7 @@
     "scripts": {
         "build": "cargo build --release",
         "build:wasm": "node scripts/build-wasm.mjs",
+        "build:ts": "pnpm --filter @yydb/hermes-unknown-wasm32 build && pnpm --filter @yydb/hermes-language build",
         "typecheck:ts": "pnpm -r --filter @yydb/hermes-language --filter @yydb/hermes-unknown-wasm32 run typecheck",
         "test:ts": "pnpm -r --filter @yydb/hermes-language --filter @yydb/hermes-unknown-wasm32 run test",
         "test": "cargo test --release",

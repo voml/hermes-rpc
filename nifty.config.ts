@@ -15,6 +15,7 @@ export default defineConfig({
             "@yydb/hermes",
             "@yydb/hermes-skills",
             "@yydb/hermes-unknown-wasm32",
+            "@yydb/hermes-language",
             "@yydb/hermes-win32-x64",
             "@yydb/hermes-linux-x64",
             "@yydb/hermes-linux-arm64",

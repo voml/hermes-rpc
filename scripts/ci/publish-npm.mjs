@@ -49,6 +49,7 @@ const NATIVE_PLATFORMS = [
 /** @type {{ dir: string; publishName?: string }[]} */
 const JS_PACKAGES = [
     { dir: "projects/hermes.ts/platforms/hermes-unknown-wasm32" },
+    { dir: "projects/hermes.ts/packages/hermes-language" },
     { dir: "projects/hermes.ts/packages/hermes-skills" },
     { dir: "projects/hermes.ts/packages/hermes", publishName: "@yydb/hermes" },
 ];
