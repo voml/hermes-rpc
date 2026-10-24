@@ -1,7 +1,7 @@
 {
   "name": "@yydb/hermes",
   "version": "0.0.2",
-  "description": "Hermes RPC runtime — VOS operation artifact loader and dispatch for Node.js (N-API + WASM facade)",
+  "description": "Hermes RPC runtime — VOS operation artifact loader and dispatch for Node.js (N-API binaries)",
   "type": "module",
   "license": "MPL-2.0",
   "sideEffects": false,
@@ -11,9 +11,6 @@
     "dist",
     "README.md"
   ],
-  "dependencies": {
-    "@yydb/hermes-unknown-wasm32": "workspace:*"
-  },
   "optionalDependencies": {
     "@yydb/hermes-darwin-arm64": "workspace:*",
     "@yydb/hermes-darwin-x64": "workspace:*",

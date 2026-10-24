@@ -2,7 +2,9 @@
 
 Hermes RPC runtime — VOS operation artifact loader and dispatch for Node.js.
 
-Provides a unified facade over platform-specific N-API binaries (Linux, macOS, Windows) with a WASM fallback (`@yydb/hermes-unknown-wasm32`) for browsers and WASI runtimes.
+Provides platform-specific N-API binaries (Linux, macOS, Windows). Browser,
+edge and WASI hosts use `@yydb/hermes-language`, which wraps the Rust
+`hermes-wasm` binding. `@yydb/hermes` does not depend on either package.
 
 ## Usage
 

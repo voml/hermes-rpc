@@ -3,6 +3,9 @@
     "packageManager": "pnpm@10.0.0",
     "scripts": {
         "build": "cargo build --release",
+        "build:wasm": "node scripts/build-wasm.mjs",
+        "typecheck:ts": "pnpm -r --filter @yydb/hermes-language --filter @yydb/hermes-unknown-wasm32 run typecheck",
+        "test:ts": "pnpm -r --filter @yydb/hermes-language --filter @yydb/hermes-unknown-wasm32 run test",
         "test": "cargo test --release",
         "fmt": "cargo fmt --all",
         "push": "wee test && git push",
