@@ -1,148 +1,188 @@
-//! 服务与 operation 注册表。
+//! 合同 registry：`service 名 + method 名` → `MethodId` → `OperationId`。
 //!
-//! services 与 operations 分开存储：services 的 key 是全限定服务名，
-//! operations 的 key 是上游给出的稳定 `operation_id`（`op_` + 16 hex）。
-//! 重复 identity 在注册期直接拒绝，不留到 dispatch 期。
+//! service、method 与 operation 的 identity 全部是上游 `vos-types` 的 durable id。
+//! registry 只做解析、冲突检测与查找，不推导 identity，也不会在查找失败时按名字
+//! 猜一个相近条目：未知 service / method 返回结构化错误。
+//!
+//! 注册是原子的：先完成全部冲突检查，再一次性写入，避免半套合同进入 registry。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use vos_types::{
-    OperationProjectionArtifact, OperationProjection, ServiceProjectionArtifact, ServiceProjection,
+    ContractArtifact, ContractFormat, MethodId, MethodStreamMode, OperationContract, OperationId, ServiceContract, ServiceId,
+    ServiceMethodContract,
 };
 
 use crate::{
-    contract::{HermesMethodDescriptor, HermesServiceContract},
+    contract::HERMES_CONTRACT_FORMAT,
     error::{RpcError, RpcErrorCode, RpcResult},
 };
 
-/// 注册与查找已加载服务描述的 trait。
-pub trait HermesServiceRegistry {
-    /// 注册服务描述。
-    fn register(&mut self, contract: HermesServiceContract) -> RpcResult<()> {
-        let name = contract.service_name.clone();
-        self.insert_contract(name, contract)
-    }
-
-    /// 按全限定名查找已注册的服务。
-    fn find(&self, service_name: &str) -> Option<&HermesServiceContract>;
-
-    /// 返回所有已注册服务的迭代。
-    fn all(&self) -> Vec<&HermesServiceContract>;
-
-    /// 按服务名 + 方法名查找已注册的方法。
-    fn method(&self, service_name: &str, method_name: &str) -> Option<&HermesMethodDescriptor> {
-        self.find(service_name).and_then(|c| c.methods.iter().find(|m| m.name == method_name))
-    }
-
-    /// 从 `ServiceProjectionArtifact` 批量注册服务描述。
-    fn register_artifact(&mut self, artifact: &ServiceProjectionArtifact) -> RpcResult<()> {
-        for projection in &artifact.services {
-            self.register_projection(projection)?;
-        }
-        Ok(())
-    }
-
-    /// 把单个 `ServiceProjection` 注册为服务描述。
-    ///
-    /// 当前 projection 阶段（`service-syntax-projection`）尚未携带 methods，
-    /// 因此转换得到的 `HermesServiceContract.methods` 为空。将来更低阶段的
-    /// projection 可以覆盖这个默认行为。
-    fn register_projection(&mut self, projection: &ServiceProjection) -> RpcResult<()> {
-        let service_name =
-            if !projection.canonical_path.is_empty() { projection.canonical_path.join(".") } else { projection.name.clone() };
-        let contract = HermesServiceContract { service_name, methods: vec![], revision: None };
-        self.register(contract)
-    }
-
-    /// 从 `OperationProjectionArtifact` 批量注册 operation。
-    ///
-    /// Operations 是顶层声明，不属于某个 service——Hermes 独立维护
-    /// operations registry（key = operation_id），与 services 分开存储。
-    fn register_operation_artifact(&mut self, artifact: &OperationProjectionArtifact) -> RpcResult<()> {
-        for operation in &artifact.operations {
-            self.register_operation(operation)?;
-        }
-        Ok(())
-    }
-
-    /// 注册单个 operation projection 到独立的 operations registry。
-    fn register_operation(&mut self, projection: &OperationProjection) -> RpcResult<()> {
-        self.insert_operation(projection.operation_id.clone(), projection.clone())
-    }
-
-    /// 按 operation_id 查找已注册的 operation。
-    fn find_operation(&self, operation_id: &str) -> Option<&OperationProjection>;
-
-    /// 按 name 查找已注册的 operation（取第一个匹配）。
-    fn find_operation_by_name(&self, name: &str) -> Option<&OperationProjection>;
-
-    /// 返回所有已注册 operation 的迭代。
-    fn all_operations(&self) -> Vec<&OperationProjection>;
-
-    /// 内部钩子：由具体实现提供实际的服务存储逻辑。
-    fn insert_contract(&mut self, name: String, contract: HermesServiceContract) -> RpcResult<()>;
-
-    /// 内部钩子：由具体实现提供实际的 operation 存储逻辑。
-    fn insert_operation(&mut self, operation_id: String, projection: OperationProjection) -> RpcResult<()>;
+/// 一次 `service.method` 解析的结果。
+#[derive(Clone, Copy, Debug)]
+pub struct MethodRoute<'a> {
+    /// 拥有该方法的 service 合同。
+    pub service: &'a ServiceContract,
+    /// 方法合同（携带 `MethodId` 与绑定的 `OperationId`）。
+    pub method: &'a ServiceMethodContract,
+    /// 方法绑定的 operation 合同。
+    pub operation: &'a OperationContract,
 }
 
-/// 基于 `BTreeMap` 的简单 registry，适合单机 Hermes 进程。
-///
-/// 独立维护 services 和 operations 两个 map：
-/// - services: key = 全限定服务名（canonical path join）
-/// - operations: key = operation_id（`op_` + 16 hex）
+impl MethodRoute<'_> {
+    /// 方法的 durable identity。
+    pub fn method_id(&self) -> &MethodId {
+        &self.method.method_id
+    }
+
+    /// 方法绑定的 operation durable identity。
+    pub fn operation_id(&self) -> &OperationId {
+        &self.method.operation_id
+    }
+
+    /// 方法的调用模式。
+    pub fn stream(&self) -> MethodStreamMode {
+        self.method.stream
+    }
+}
+
+/// 以 durable identity 为 key 的合同 registry。
 #[derive(Clone, Debug, Default)]
-pub struct BTreeServiceRegistry {
-    services: BTreeMap<String, HermesServiceContract>,
-    operations: BTreeMap<String, OperationProjection>,
+pub struct ContractRegistry {
+    services: BTreeMap<ServiceId, ServiceContract>,
+    operations: BTreeMap<OperationId, OperationContract>,
+    service_names: BTreeMap<String, ServiceId>,
 }
 
-impl BTreeServiceRegistry {
-    /// 按全限定名（canonical path join）或原始名查找 projection artifact 中的服务。
-    pub fn find_by_name_or_canonical(&self, projection: &ServiceProjection) -> Option<&HermesServiceContract> {
-        let canonical =
-            if !projection.canonical_path.is_empty() { projection.canonical_path.join(".") } else { projection.name.clone() };
-        self.find(&canonical).or_else(|| self.find(&projection.name))
-    }
-}
-
-impl HermesServiceRegistry for BTreeServiceRegistry {
-    fn insert_contract(&mut self, name: String, contract: HermesServiceContract) -> RpcResult<()> {
-        if self.services.contains_key(&name) {
-            return Err(RpcError::new(RpcErrorCode::DuplicateRegistration, format!("service `{name}` already registered")));
-        }
-        self.services.insert(name, contract);
-        Ok(())
+impl ContractRegistry {
+    /// 构造空 registry。
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    fn insert_operation(&mut self, operation_id: String, projection: OperationProjection) -> RpcResult<()> {
-        if self.operations.contains_key(&operation_id) {
+    /// 注册一份 Hermes 合同 artifact。
+    ///
+    /// 拒绝非 Hermes 格式、重复 service 名、重复 service / method / operation id，
+    /// 以及绑定了 payload 中不存在 operation 的 method。
+    pub fn register_artifact(&mut self, artifact: &ContractArtifact) -> RpcResult<()> {
+        if artifact.version != ContractFormat::Hermes {
             return Err(RpcError::new(
-                RpcErrorCode::DuplicateRegistration,
-                format!("operation `{}` ({operation_id}) already registered", projection.name),
-            ));
+                RpcErrorCode::ArtifactCorrupt,
+                format!("registry accepts only `{HERMES_CONTRACT_FORMAT}`, found `{}`", artifact.version.as_str()),
+            )
+            .with_diagnostic_code("ART010"));
         }
-        self.operations.insert(operation_id, projection);
+
+        let mut incoming_services: BTreeMap<ServiceId, ServiceContract> = BTreeMap::new();
+        let mut incoming_operations: BTreeMap<OperationId, OperationContract> = BTreeMap::new();
+        let mut incoming_names: BTreeMap<String, ServiceId> = BTreeMap::new();
+        let mut method_ids: BTreeSet<MethodId> = BTreeSet::new();
+
+        for operation in &artifact.payload.operations {
+            if self.operations.contains_key(&operation.operation_id)
+                || incoming_operations.contains_key(&operation.operation_id)
+            {
+                return Err(duplicate("operation", operation.operation_id.as_str()));
+            }
+            incoming_operations.insert(operation.operation_id.clone(), operation.clone());
+        }
+
+        for service in &artifact.payload.services {
+            if service.name.trim().is_empty() {
+                return Err(RpcError::new(RpcErrorCode::ArtifactCorrupt, "service name must not be empty"));
+            }
+            if self.services.contains_key(&service.service_id) || incoming_services.contains_key(&service.service_id) {
+                return Err(duplicate("service id", service.service_id.as_str()));
+            }
+            if self.service_names.contains_key(&service.name) || incoming_names.contains_key(&service.name) {
+                return Err(duplicate("service name", &service.name));
+            }
+            incoming_names.insert(service.name.clone(), service.service_id.clone());
+
+            let mut method_names: BTreeSet<&str> = BTreeSet::new();
+            for method in &service.methods {
+                if method.name.trim().is_empty() {
+                    return Err(RpcError::new(
+                        RpcErrorCode::ArtifactCorrupt,
+                        format!("service `{}` has an empty method name", service.name),
+                    ));
+                }
+                if !method_names.insert(method.name.as_str()) {
+                    return Err(duplicate("method name", &format!("{}.{}", service.name, method.name)));
+                }
+                if !method_ids.insert(method.method_id.clone()) {
+                    return Err(duplicate("method id", method.method_id.as_str()));
+                }
+                if !incoming_operations.contains_key(&method.operation_id)
+                    && !self.operations.contains_key(&method.operation_id)
+                {
+                    return Err(RpcError::new(
+                        RpcErrorCode::MissingOperationBinding,
+                        format!(
+                            "method `{}.{}` binds operation `{}` which is not present in the contract",
+                            service.name, method.name, method.operation_id
+                        ),
+                    ));
+                }
+            }
+            incoming_services.insert(service.service_id.clone(), service.clone());
+        }
+
+        self.operations.extend(incoming_operations);
+        self.service_names.extend(incoming_names);
+        self.services.extend(incoming_services);
         Ok(())
     }
 
-    fn find(&self, service_name: &str) -> Option<&HermesServiceContract> {
-        self.services.get(service_name)
+    /// 按 service 名 + method 名解析到 method 与 operation 合同。
+    pub fn resolve(&self, service_name: &str, method_name: &str) -> RpcResult<MethodRoute<'_>> {
+        let service_id = self.service_names.get(service_name).ok_or_else(|| {
+            RpcError::new(RpcErrorCode::UnknownService, format!("service `{service_name}` is not registered"))
+        })?;
+        let service = self.services.get(service_id).ok_or_else(|| {
+            RpcError::new(RpcErrorCode::UnknownService, format!("service `{service_name}` is not registered"))
+        })?;
+        let method = service.methods.iter().find(|method| method.name == method_name).ok_or_else(|| {
+            RpcError::new(RpcErrorCode::UnknownMethod, format!("service `{service_name}` has no method `{method_name}`"))
+        })?;
+        let operation = self.operations.get(&method.operation_id).ok_or_else(|| {
+            RpcError::new(
+                RpcErrorCode::MissingOperationBinding,
+                format!(
+                    "method `{service_name}.{method_name}` binds operation `{}` which is not registered",
+                    method.operation_id
+                ),
+            )
+        })?;
+        Ok(MethodRoute { service, method, operation })
     }
 
-    fn all(&self) -> Vec<&HermesServiceContract> {
-        self.services.values().collect()
+    /// 按 service 名查找 service 合同。
+    pub fn service(&self, service_name: &str) -> Option<&ServiceContract> {
+        self.service_names.get(service_name).and_then(|id| self.services.get(id))
     }
 
-    fn find_operation(&self, operation_id: &str) -> Option<&OperationProjection> {
+    /// 按 durable id 查找 operation 合同。
+    pub fn operation(&self, operation_id: &OperationId) -> Option<&OperationContract> {
         self.operations.get(operation_id)
     }
 
-    fn find_operation_by_name(&self, name: &str) -> Option<&OperationProjection> {
-        self.operations.values().find(|op| op.name == name)
+    /// 已注册 service 的数量。
+    pub fn service_count(&self) -> usize {
+        self.services.len()
     }
 
-    fn all_operations(&self) -> Vec<&OperationProjection> {
-        self.operations.values().collect()
+    /// 已注册 service 名（按名字排序）。
+    pub fn service_names(&self) -> Vec<&str> {
+        self.service_names.keys().map(String::as_str).collect()
     }
+
+    /// 已注册 operation 的数量。
+    pub fn operation_count(&self) -> usize {
+        self.operations.len()
+    }
+}
+
+fn duplicate(kind: &str, value: &str) -> RpcError {
+    RpcError::new(RpcErrorCode::DuplicateRegistration, format!("{kind} `{value}` already registered"))
 }

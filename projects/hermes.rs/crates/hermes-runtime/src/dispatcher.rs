@@ -1,65 +1,64 @@
-//! operation → handler 路由与 dispatch。
+//! `service.method` → operation → handler 路由与 dispatch。
 //!
-//! dispatch 层是纯路由：handler 内部的业务逻辑由用户用 Rust 写死，Hermes 只
-//! 负责按 `operation_id` 找到 handler 并调用。VOS projection 阶段尚未把 body
-//! lowering 成可执行代码。
+//! dispatch 是纯路由：handler 的业务逻辑由宿主用 Rust 实现，Hermes 只负责按
+//! registry 解析出的 `OperationId` 找到 handler 并调用。VOS body 不进入本层，
+//! 合同也不携带可执行代码。
+//!
+//! 请求参数按绑定的 `OperationContract.parameters` 校验，返回值按合同声明的
+//! canonical type 校验。unary 与 server-stream 两种模式各自只接受对应的返回
+//! 形态，模式不符返回 `stream-mode-mismatch`。
 //!
 //! 生命周期参数（deadline / cancellation / 并发上限）在 [`super::lifecycle`] 中
 //! 定义，dispatch 前后各强制检查一次，等待并发许可期间同样响应取消与超时。
 
 use std::collections::BTreeMap;
 
-use vos_types::{OperationProjectionArtifact, OperationProjection, ServiceProjectionArtifact, OPERATION_ID_PREFIX};
+use serde_json::Value;
+use vos_types::{MethodStreamMode, OperationContract, OperationId};
 
 use crate::{
     codec,
+    contract::parse_contract_artifact,
     error::{RpcError, RpcErrorCode, RpcResult},
     lifecycle::{CallContext, CallOptions, InFlightLimiter},
-    loader::JsonServiceLoader,
-    registry::{BTreeServiceRegistry, HermesServiceRegistry},
+    registry::{ContractRegistry, MethodRoute},
     wire::{HermesDispatchRequest, HermesDispatchResponse},
 };
 
-/// 用户为每个 operation 注册的处理器 trait。
+/// handler 返回给 dispatch 层的响应形态。
+#[derive(Clone, Debug, PartialEq)]
+pub enum OperationReply {
+    /// unary 方法的单个返回值。
+    Unary(Value),
+    /// server-stream 方法的响应元素序列。
+    ServerStream(Vec<Value>),
+}
+
+/// 宿主为每个 operation 注册的处理器 trait。
 pub trait HermesOperationHandler: Send + Sync {
-    /// 执行对应 operation，返回 JSON 值或结构化错误。
+    /// 执行对应 operation。
     ///
     /// `ctx` 提供 deadline 与取消状态，长耗时 handler 应周期性调用
-    /// [`CallContext::check`]。`projection` 提供 operation 的静态声明信息
-    /// （name / kind / parameters 等），`params` 是按 operation 参数 codec 解码后的
-    /// JSON 参数对象。
-    fn execute(
-        &self,
-        ctx: &CallContext,
-        projection: &OperationProjection,
-        params: &serde_json::Value,
-    ) -> RpcResult<serde_json::Value>;
+    /// [`CallContext::check`]。`operation` 是 registry 中绑定的
+    /// [`OperationContract`]，`params` 是按合同参数 codec 解码后的 JSON 对象。
+    fn execute(&self, ctx: &CallContext, operation: &OperationContract, params: &Value) -> RpcResult<OperationReply>;
 }
 
-/// 校验 `operation_id` 字符串形状：必须是 `"op_"` + 恰好 16 个 hex 数字。
-fn is_valid_operation_id(id: &str) -> bool {
-    if !id.starts_with(OPERATION_ID_PREFIX) {
-        return false;
-    }
-    let tail = &id[OPERATION_ID_PREFIX.len()..];
-    tail.len() == 16 && tail.chars().all(|c| c.is_ascii_hexdigit())
+/// 一次已校验的 dispatch 结果。
+#[derive(Clone, Debug, PartialEq)]
+pub enum DispatchReply {
+    /// unary 返回值。
+    Unary(Value),
+    /// server-stream 响应元素序列。
+    ServerStream(Vec<Value>),
 }
 
-/// Hermes RPC dispatch 核心：持有 registry + handler map，按
-/// `operation_id` 路由到用户注册的 `HermesOperationHandler`。
+/// Hermes RPC dispatch 核心：持有合同 registry + handler map。
 #[derive(Default)]
 pub struct HermesDispatcher {
-    registry: BTreeServiceRegistry,
-    handlers: BTreeMap<String, Box<dyn HermesOperationHandler>>,
+    registry: ContractRegistry,
+    handlers: BTreeMap<OperationId, Box<dyn HermesOperationHandler>>,
     limiter: InFlightLimiter,
-}
-
-impl Clone for HermesDispatcher {
-    fn clone(&self) -> Self {
-        // handler map 里的 opaque trait object 不能 Clone，新实例保留
-        // 相同 registry 与并发上限但 handler 列表为空——调用方可重新注册。
-        Self { registry: self.registry.clone(), handlers: BTreeMap::new(), limiter: self.limiter.clone() }
-    }
 }
 
 impl std::fmt::Debug for HermesDispatcher {
@@ -79,18 +78,18 @@ impl HermesDispatcher {
     }
 
     /// 用已有 registry 构造 dispatcher。
-    pub fn with_registry(registry: BTreeServiceRegistry) -> Self {
+    pub fn with_registry(registry: ContractRegistry) -> Self {
         Self { registry, handlers: BTreeMap::new(), limiter: InFlightLimiter::default() }
     }
 
-    /// 返回一个共享的 `JsonServiceLoader` 实例（无状态，调用零成本）。
-    pub fn loader(&self) -> JsonServiceLoader {
-        JsonServiceLoader::default()
+    /// 只读访问内部 registry。
+    pub fn registry(&self) -> &ContractRegistry {
+        &self.registry
     }
 
-    /// 只读访问内部 registry。
-    pub fn registry(&self) -> &BTreeServiceRegistry {
-        &self.registry
+    /// 可变访问内部 registry（绑定层逐份注册合同用）。
+    pub fn registry_mut(&mut self) -> &mut ContractRegistry {
+        &mut self.registry
     }
 
     /// 设置在途 dispatch 上限。`None` 或 `Some(0)` 表示不限。
@@ -103,135 +102,142 @@ impl HermesDispatcher {
         self.limiter.limit()
     }
 
-    /// 从 JSON 字符串解析 `ServiceProjectionArtifact` 并注册到内部 registry。
-    pub fn load_service_artifact(&mut self, json: &str) -> RpcResult<()> {
-        let artifact = ServiceProjectionArtifact::from_json(json).map_err(RpcError::from_artifact)?;
+    /// 从 Hermes 合同 artifact JSON 解析并注册合同。
+    pub fn load_contract_artifact(&mut self, json: &str) -> RpcResult<()> {
+        let artifact = parse_contract_artifact(json)?;
         self.registry.register_artifact(&artifact)
-    }
-
-    /// 从 JSON 字符串解析 `OperationProjectionArtifact` 并注册到内部 registry。
-    pub fn load_operation_artifact(&mut self, json: &str) -> RpcResult<()> {
-        let artifact = OperationProjectionArtifact::from_json(json).map_err(RpcError::from_artifact)?;
-        self.registry.register_operation_artifact(&artifact)
     }
 
     /// 为 `operation_id` 注册一个 handler。
     ///
-    /// 会先校验 `operation_id` 形状（`op_` + 16 hex），再校验 registry
-    /// 里确实存在这个 operation——提前暴露注册手误，防止 dispatch
-    /// 才发现。
+    /// 先按上游 identity 规则校验 id，再确认 registry 里确实存在该 operation，
+    /// 提前暴露注册手误。
     pub fn register_handler(&mut self, operation_id: &str, handler: Box<dyn HermesOperationHandler>) -> RpcResult<()> {
-        if !is_valid_operation_id(operation_id) {
-            return Err(RpcError::new(RpcErrorCode::InvalidRequest, format!("operation_id malformed: {operation_id}")));
-        }
-        if self.registry.find_operation(operation_id).is_none() {
+        let operation_id = OperationId::parse(operation_id).map_err(|error| {
+            RpcError::new(RpcErrorCode::InvalidRequest, format!("operation id malformed: {}", error.message))
+        })?;
+        if self.registry.operation(&operation_id).is_none() {
             return Err(RpcError::new(
                 RpcErrorCode::UnknownOperation,
                 format!("operation `{operation_id}` not found in registry — cannot register handler"),
             ));
         }
-        if self.handlers.contains_key(operation_id) {
+        if self.handlers.contains_key(&operation_id) {
             return Err(RpcError::new(
                 RpcErrorCode::DuplicateRegistration,
                 format!("handler for operation `{operation_id}` already registered"),
             ));
         }
-        self.handlers.insert(operation_id.to_string(), handler);
+        self.handlers.insert(operation_id, handler);
         Ok(())
     }
 
-    /// 按 `operation_id` 直接 dispatch，不设 deadline 也不绑定取消令牌。
-    ///
-    /// 未知 operation 返回 `unknown-operation`，未绑定 handler 返回
-    /// `handler-not-registered`，handler 自身的错误原样透传。
-    pub fn dispatch(&self, operation_id: &str, params: &serde_json::Value) -> RpcResult<serde_json::Value> {
-        self.dispatch_with(operation_id, params, &CallOptions::default())
+    /// 按 `service.method` dispatch，不设 deadline 也不绑定取消令牌。
+    pub fn dispatch(&self, service: &str, method: &str, params: &Value) -> RpcResult<DispatchReply> {
+        self.dispatch_with(service, method, params, &CallOptions::default())
     }
 
-    /// 按 `operation_id` dispatch，并带上生命周期参数。
+    /// 按 `service.method` dispatch，并带上生命周期参数。
     ///
-    /// 顺序：解析 operation → 找 handler → 等并发许可 → 解码参数 → handler
-    /// 执行 → 编码返回值。取消与 deadline 在每一步之间各检查一次；即使 handler
-    /// 已返回结果，只要期间超时或被取消，仍返回 `deadline-exceeded` /
-    /// `cancelled`，避免调用方拿到已经过期的响应。
-    ///
-    /// 参数按 operation projection 的 `parameters` codec 解码：缺失 / 多余参数
-    /// 或 wire 形状不符返回 `invalid-request`，类型没有 descriptor 返回
-    /// `unsupported-codec`。返回值按 `return_type` 编码，`None` 时不额外约束。
+    /// 顺序：解析 method 路由 → 找 handler → 等并发许可 → 校验参数 → 执行 →
+    /// 校验返回值形态与类型。取消与 deadline 在每一步之间各检查一次；即使
+    /// handler 已返回结果，只要期间超时或被取消，仍返回 `deadline-exceeded` /
+    /// `cancelled`。
     pub fn dispatch_with(
         &self,
-        operation_id: &str,
-        params: &serde_json::Value,
+        service: &str,
+        method: &str,
+        params: &Value,
         options: &CallOptions,
-    ) -> RpcResult<serde_json::Value> {
+    ) -> RpcResult<DispatchReply> {
+        let route = self.registry.resolve(service, method)?;
+        self.dispatch_route(&route, params, options)
+    }
+
+    fn dispatch_route(&self, route: &MethodRoute<'_>, params: &Value, options: &CallOptions) -> RpcResult<DispatchReply> {
         let ctx = CallContext::new(options.clone());
         ctx.check()?;
 
-        let projection = self
-            .registry
-            .find_operation(operation_id)
-            .ok_or_else(|| RpcError::new(RpcErrorCode::UnknownOperation, format!("operation not found: {operation_id}")))?;
-        let handler = self.handlers.get(operation_id).ok_or_else(|| {
-            RpcError::new(RpcErrorCode::HandlerNotRegistered, format!("handler not registered for operation {operation_id}"))
+        let operation = route.operation;
+        let handler = self.handlers.get(&operation.operation_id).ok_or_else(|| {
+            RpcError::new(
+                RpcErrorCode::HandlerNotRegistered,
+                format!("handler not registered for operation {}", operation.operation_id),
+            )
         })?;
 
         let _permit = self.limiter.acquire(&ctx)?;
         ctx.check()?;
 
-        let decoded = codec::decode_params(projection, params)?;
-        let result = handler.execute(&ctx, projection, &decoded);
+        let decoded = codec::decode_params(operation, params)?;
+        let reply = handler.execute(&ctx, operation, &decoded);
         ctx.check()?;
-        let result = result?;
-        codec::encode_result(projection, &result)
+        self.validate_reply(route, reply?)
     }
 
-    /// 按 operation 名称 dispatch，不设 deadline 也不绑定取消令牌。
-    pub fn dispatch_by_name(&self, name: &str, params: &serde_json::Value) -> RpcResult<serde_json::Value> {
-        self.dispatch_by_name_with(name, params, &CallOptions::default())
+    fn validate_reply(&self, route: &MethodRoute<'_>, reply: OperationReply) -> RpcResult<DispatchReply> {
+        match (route.method.stream, reply) {
+            (MethodStreamMode::Unary, OperationReply::Unary(value)) => {
+                let value = match &route.operation.result_type {
+                    Some(result_type) => {
+                        let codec = codec::codec_for(result_type)?;
+                        codec::encode_value(&codec, &value)?
+                    }
+                    None => value,
+                };
+                Ok(DispatchReply::Unary(value))
+            }
+            (MethodStreamMode::ServerStream, OperationReply::ServerStream(items)) => {
+                let codec = codec::codec_for(&route.method.response_type)?;
+                let items = items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        codec::check_value(&codec, item, &format!("response[{index}]"), RpcErrorCode::HandlerFailed)
+                    })
+                    .collect::<RpcResult<Vec<_>>>()?;
+                Ok(DispatchReply::ServerStream(items))
+            }
+            (MethodStreamMode::Unary, OperationReply::ServerStream(_)) => Err(RpcError::new(
+                RpcErrorCode::StreamModeMismatch,
+                format!(
+                    "method `{}.{}` is unary but the handler returned a server stream",
+                    route.service.name, route.method.name
+                ),
+            )),
+            (MethodStreamMode::ServerStream, OperationReply::Unary(_)) => Err(RpcError::new(
+                RpcErrorCode::StreamModeMismatch,
+                format!(
+                    "method `{}.{}` is server-stream but the handler returned one value",
+                    route.service.name, route.method.name
+                ),
+            )),
+        }
     }
 
-    /// 按 operation 名称 dispatch，并带上生命周期参数。先在 registry 里按
-    /// `name` 找 operation，拿到 `operation_id` 后走 [`Self::dispatch_with`]。
-    pub fn dispatch_by_name_with(
-        &self,
-        name: &str,
-        params: &serde_json::Value,
-        options: &CallOptions,
-    ) -> RpcResult<serde_json::Value> {
-        let projection = self
-            .registry
-            .find_operation_by_name(name)
-            .ok_or_else(|| RpcError::new(RpcErrorCode::UnknownOperation, format!("operation not found by name: {name}")))?;
-        self.dispatch_with(&projection.operation_id, params, options)
-    }
-
-    /// 解析 `HermesDispatchRequest`：如果 `operation` 字段以 `op_` 开头
-    /// 视为 `operation_id`，否则视为 operation 名称。
+    /// 解析 `HermesDispatchRequest`。
     pub fn dispatch_request(&self, request: &HermesDispatchRequest) -> HermesDispatchResponse {
         self.dispatch_request_with(request, &CallOptions::default())
     }
 
     /// 解析 `HermesDispatchRequest` 并带上生命周期参数，结果折成 wire envelope。
     pub fn dispatch_request_with(&self, request: &HermesDispatchRequest, options: &CallOptions) -> HermesDispatchResponse {
-        let is_id = is_valid_operation_id(&request.operation);
-        let (result, operation_id) = if is_id {
-            (self.dispatch_with(&request.operation, &request.params, options), request.operation.clone())
-        }
-        else {
-            match self.registry.find_operation_by_name(&request.operation) {
-                Some(op) => (self.dispatch_with(&op.operation_id, &request.params, options), op.operation_id.clone()),
-                None => (
-                    Err(RpcError::new(
-                        RpcErrorCode::UnknownOperation,
-                        format!("operation not found by name: {}", request.operation),
-                    )),
-                    String::new(),
-                ),
+        match self.registry.resolve(request.service(), request.method()) {
+            Ok(route) => {
+                let operation_id = route.operation.operation_id.to_string();
+                let method_id = route.method.method_id.to_string();
+                let result = self.dispatch_route(&route, request.params(), options);
+                HermesDispatchResponse::from_reply(
+                    request.service().to_string(),
+                    request.method().to_string(),
+                    operation_id,
+                    method_id,
+                    result,
+                )
             }
-        };
-        match result {
-            Ok(value) => HermesDispatchResponse { result: Some(value), error: None, operation_id },
-            Err(err) => HermesDispatchResponse { result: None, error: Some(err), operation_id },
+            Err(error) => {
+                HermesDispatchResponse::from_error(request.service().to_string(), request.method().to_string(), error)
+            }
         }
     }
 }

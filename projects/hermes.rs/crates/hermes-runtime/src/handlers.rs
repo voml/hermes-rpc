@@ -2,10 +2,11 @@
 //!
 //! 这些 handler 只服务于 fixture 级测试，不承载任何业务语义。
 
-use vos_types::OperationProjection;
+use serde_json::Value;
+use vos_types::OperationContract;
 
 use crate::{
-    dispatcher::HermesOperationHandler,
+    dispatcher::{HermesOperationHandler, OperationReply},
     error::{RpcError, RpcErrorCode, RpcResult},
     lifecycle::CallContext,
 };
@@ -15,13 +16,8 @@ use crate::{
 pub struct EchoHandler;
 
 impl HermesOperationHandler for EchoHandler {
-    fn execute(
-        &self,
-        _ctx: &CallContext,
-        _projection: &OperationProjection,
-        params: &serde_json::Value,
-    ) -> RpcResult<serde_json::Value> {
-        Ok(params.clone())
+    fn execute(&self, _ctx: &CallContext, _operation: &OperationContract, params: &Value) -> RpcResult<OperationReply> {
+        Ok(OperationReply::Unary(params.clone()))
     }
 }
 
@@ -34,22 +30,17 @@ impl HermesOperationHandler for EchoHandler {
 pub struct AddHandler;
 
 impl HermesOperationHandler for AddHandler {
-    fn execute(
-        &self,
-        _ctx: &CallContext,
-        _projection: &OperationProjection,
-        params: &serde_json::Value,
-    ) -> RpcResult<serde_json::Value> {
+    fn execute(&self, _ctx: &CallContext, _operation: &OperationContract, params: &Value) -> RpcResult<OperationReply> {
         let a = int_param(params, "a")?;
         let b = int_param(params, "b")?;
-        Ok(serde_json::Value::String((a + b).to_string()))
+        Ok(OperationReply::Unary(Value::String((a + b).to_string())))
     }
 }
 
-fn int_param(params: &serde_json::Value, name: &str) -> RpcResult<i64> {
+fn int_param(params: &Value, name: &str) -> RpcResult<i64> {
     params
         .get(name)
-        .and_then(serde_json::Value::as_str)
+        .and_then(Value::as_str)
         .and_then(|text| text.parse::<i64>().ok())
         .ok_or_else(|| RpcError::new(RpcErrorCode::InvalidRequest, format!("missing or non-integer-string param `{name}`")))
 }

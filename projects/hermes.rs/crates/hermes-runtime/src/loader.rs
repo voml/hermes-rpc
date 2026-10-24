@@ -1,64 +1,40 @@
-//! artifact 加载器。
+//! 合同 artifact 的来源抽象。
+//!
+//! Hermes 只消费上游产出的合同 artifact，不读 VOS 源文本。loader 负责把字节
+//! 解码成 Hermes 合同，并复用 [`crate::contract::parse_contract_artifact`] 的
+//! 格式、指纹与 producer 校验。
 
-use vos_types::{ArtifactError, OperationProjectionArtifact, ServiceProjectionArtifact};
+use std::path::Path;
+
+use vos_types::ContractArtifact;
 
 use crate::{
-    contract::HermesServiceContract,
+    contract::parse_contract_artifact,
     error::{RpcError, RpcErrorCode, RpcResult},
 };
 
-fn artifact_from_bytes<T, F>(source: &[u8], parse: F) -> RpcResult<T>
-where
-    F: FnOnce(&str) -> Result<T, ArtifactError>,
-{
-    let json = std::str::from_utf8(source)
-        .map_err(|err| RpcError::new(RpcErrorCode::ArtifactCorrupt, err.to_string()))?;
-    parse(json).map_err(RpcError::from_artifact)
-}
+/// 把外部来源解码成 Hermes 合同 artifact。
+pub trait HermesContractLoader {
+    /// 从字节加载合同。`source` 必须是 Hermes artifact JSON。
+    fn load_contract(&self, source: &[u8]) -> RpcResult<ContractArtifact>;
 
-/// 从 artifact 加载服务描述的 trait。
-pub trait HermesServiceLoader {
-    /// 解析 `HermesServiceContract` 形状的手写 artifact。
-    fn load(&self, source: &[u8]) -> RpcResult<HermesServiceContract> {
-        let contract: HermesServiceContract = serde_json::from_slice(source)
-            .map_err(|err| RpcError::new(RpcErrorCode::InvalidRequest, err.to_string()))?;
-        Ok(contract)
-    }
-
-    /// 从文件加载手写 artifact。
-    fn load_file(&self, path: &std::path::Path) -> RpcResult<HermesServiceContract> {
+    /// 从文件加载合同。
+    fn load_contract_file(&self, path: &Path) -> RpcResult<ContractArtifact> {
         let bytes = std::fs::read(path)?;
-        self.load(&bytes)
-    }
-
-    /// 解析 `vos-language` 产出的 service projection artifact。
-    fn load_artifact(&self, source: &[u8]) -> RpcResult<ServiceProjectionArtifact> {
-        artifact_from_bytes(source, ServiceProjectionArtifact::from_json)
-    }
-
-    /// 从文件加载 service projection artifact。
-    fn load_artifact_file(&self, path: &std::path::Path) -> RpcResult<ServiceProjectionArtifact> {
-        let bytes = std::fs::read(path)?;
-        self.load_artifact(&bytes)
-    }
-
-    /// 解析 `vos-language` 产出的 operation projection artifact。
-    fn load_operation_artifact(&self, source: &[u8]) -> RpcResult<OperationProjectionArtifact> {
-        artifact_from_bytes(source, OperationProjectionArtifact::from_json)
-    }
-
-    /// 从文件加载 operation projection artifact。
-    fn load_operation_artifact_file(
-        &self,
-        path: &std::path::Path,
-    ) -> RpcResult<OperationProjectionArtifact> {
-        let bytes = std::fs::read(path)?;
-        self.load_operation_artifact(&bytes)
+        self.load_contract(&bytes)
     }
 }
 
-/// 用 `serde_json` 解析 artifact 的默认 loader。
-#[derive(Clone, Debug, Default)]
-pub struct JsonServiceLoader;
+/// JSON artifact loader（Hermes 的唯一内置来源形态）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JsonContractLoader;
 
-impl HermesServiceLoader for JsonServiceLoader {}
+impl HermesContractLoader for JsonContractLoader {
+    fn load_contract(&self, source: &[u8]) -> RpcResult<ContractArtifact> {
+        let json = std::str::from_utf8(source).map_err(|error| {
+            RpcError::new(RpcErrorCode::ArtifactCorrupt, format!("contract artifact is not valid UTF-8: {error}"))
+                .with_diagnostic_code("ART010")
+        })?;
+        parse_contract_artifact(json)
+    }
+}

@@ -1,8 +1,11 @@
-//! Hermes RPC ?????? mock ?????
+//! Hermes RPC 集成测试：上游合同 fixture → registry → dispatch。
 //!
-//! ?? loader / registry / dispatcher / wire envelope ????artifact ??
-//! ??? serde ??? span ????? `vos-types` ??????
-//! ?????? artifact ????????
+//! fixture 直接取自上游 `vos-language` 的合同参考样例（`vos/iris.contract/v0`），
+//! 测试先按上游类型解码再重新封装成 `vos/hermes.contract/v0`，证明 Hermes 没有
+//! 合同语义副本：payload、fingerprint 与 identity 都来自 `vos-types`。
+//!
+//! 失败路径覆盖：未知版本 / 未知字段 / 指纹不匹配 / producer 缺版本 / payload
+//! 内部诊断码保留，以及 registry 冲突、类型不符与 stream 模式不符。
 
 use std::{
     sync::{Arc, Condvar, Mutex, mpsc},
@@ -11,472 +14,204 @@ use std::{
 };
 
 use hermes_runtime::{
-    AddHandler, BTreeServiceRegistry, CallContext, CallOptions, CancelToken, EchoHandler, HermesDispatcher,
-    HermesMethodDescriptor, HermesOperationHandler, HermesServiceContract, HermesServiceLoader, HermesServiceRegistry,
-    JsonServiceLoader, RpcResult, WireCodec,
-    codec::codec_for,
-    error::RpcErrorCode,
-    projection::{CanonicalType, OperationKind, OperationProjection},
+    AddHandler, CallOptions, CancelToken, CanonicalScalar, ContractArtifact, ContractFormat, ContractPayload, ContractProducer,
+    ContractRegistry, DispatchReply, EchoHandler, HermesDispatchRequest, HermesDispatchResponse, HermesDispatcher,
+    HermesOperationHandler, MethodId, MethodIdentityKey, MethodStreamMode, OperationContract, OperationEffect, OperationId,
+    OperationIdentityKey, OperationKind, OperationParameterContract, OperationParameterKey, OperationReply,
+    ResolvedCanonicalType, RpcErrorCode, RpcResult, ServiceContract, ServiceId, ServiceIdentityKey, ServiceMethodContract,
+    parse_contract_artifact, seal_hermes_artifact,
 };
+use serde_json::{Value, json};
 
-/// ?? service artifact????????? methods?
-const SERVICE_ARTIFACT: &str = r#"{
-    "envelope": {
-        "stage": "service-syntax-projection",
-        "contractFormatVersion": "vos-service-contract-v0",
-        "languageVersion": "vos-language-v0",
-        "canonicalizationVersion": "vos-canonical-v0",
-        "schemaFingerprint": null,
-        "sourceUnits": [{
-            "sourceUnitId": 0,
-            "source": "service FileService {\n  read_file(path: utf8): FileContent\n}\n\nservice Notify {\n  send(to: utf8, msg: utf8): bool\n}\n"
-        }]
-    },
-    "services": [
-        {
-            "name": "FileService",
-            "canonicalPath": ["hermes", "rpc", "FileService"],
-            "serviceId": "svc_fed285365413894d",
-            "span": {"start": 0, "end": 55}
-        },
-        {
-            "name": "Notify",
-            "canonicalPath": ["hermes", "rpc", "Notify"],
-            "serviceId": "svc_ce632aef610efc9d",
-            "span": {"start": 57, "end": 100}
-        }
-    ]
-}"#;
+/// 上游 `vos-language` 合同参考 fixture（Iris 格式）。
+const UPSTREAM_FIXTURE: &str = include_str!("fixtures/operations_services.contract.json");
 
-/// fixture operation artifact：无参数 echo A、带 `i64` 参数/返回的 B、无 handler 的 C。
-const OPERATION_ARTIFACT: &str = r#"{
-    "envelope": {
-        "stage": "operation-syntax-projection",
-        "contractFormatVersion": "vos-operation-contract-v0",
-        "languageVersion": "vos-language-v0",
-        "canonicalizationVersion": "vos-canonical-v0",
-        "schemaFingerprint": null,
-        "sourceUnits": [{
-            "sourceUnitId": 0,
-            "source": "query A()\nudf B(a: i64, b: i64): i64\nmicro C()"
-        }]
-    },
-    "operations": [
-        {
-            "kind": "query",
-            "name": "A",
-            "identityKey": "query:A()",
-            "operationId": "op_bcbc253a76d10ef5",
-            "parameters": [],
-            "returnType": null,
-            "signature": null,
-            "body": null,
-            "span": {"start": 0, "end": 9}
-        },
-        {
-            "kind": "udf",
-            "name": "B",
-            "identityKey": "udf:B(a:i64,b:i64)->i64",
-            "operationId": "op_b6c3f1b0a7481391",
-            "parameters": [
-                {"name": "a", "typeExpr": {"named": ["i64"]}, "span": {"start": 16, "end": 17}},
-                {"name": "b", "typeExpr": {"named": ["i64"]}, "span": {"start": 24, "end": 25}}
-            ],
-            "returnType": {"named": ["i64"]},
-            "signature": null,
-            "body": null,
-            "span": {"start": 10, "end": 36}
-        },
-        {
-            "kind": "micro",
-            "name": "C",
-            "identityKey": "micro:C()",
-            "operationId": "op_fe2999f6bcf707d1",
-            "parameters": [],
-            "returnType": null,
-            "signature": null,
-            "body": null,
-            "span": {"start": 37, "end": 46}
-        }
-    ]
-}"#;
+const CREATE_OP: &str = "op_38ecee3afe0deee18f4f4c89f7b33c390d84844a3bf0832632f2f612cd132437";
+const LOOKUP_OP: &str = "op_c9d4e9ea491ec269e6681aa00b353d24269e48702ae07081cd65cea635361d5d";
+const CREATE_METHOD: &str = "mtd_a1195cc42bc0418387f233d5db60833493a2aecab3923e75c97be3509f0aecfd";
+const LOOKUP_METHOD: &str = "mtd_8209e030c55458c829b98b16cd5cb582db22fca4ec29fcc991241dfc36ce3ff8";
+const USER_ID: &str = "018f2c00-0000-7000-8000-000000000001";
+const UNKNOWN_OP: &str = "op_0000000000000000000000000000000000000000000000000000000000000000";
 
-fn sample_contract_artifact() -> Vec<u8> {
-    br#"{
-        "service_name": "hermes.rpc.FileService",
-        "revision": "vos-language-dev-a1b2c3",
-        "methods": [
-            {"name": "read_file",  "request_type": "ReadFileRequest",  "response_type": "FileContent"},
-            {"name": "write_file", "request_type": "WriteFileRequest", "response_type": "WriteResult", "docs": "Persist file bytes"}
-        ]
-    }"#
-    .to_vec()
+// ---------------------------------------------------------------------------
+// fixture 与合同构造
+// ---------------------------------------------------------------------------
+
+fn upstream_artifact() -> ContractArtifact {
+    serde_json::from_str(UPSTREAM_FIXTURE).expect("upstream fixture decodes as a contract artifact")
 }
 
-// --- Loader ?? --------------------------------------------------------
-
-#[test]
-fn json_loader_parses_valid_artifact() {
-    let loader = JsonServiceLoader::default();
-    let contract = loader.load(&sample_contract_artifact()).expect("should parse");
-
-    assert_eq!(contract.service_name, "hermes.rpc.FileService");
-    assert_eq!(contract.revision.as_deref(), Some("vos-language-dev-a1b2c3"));
-    assert_eq!(contract.methods.len(), 2);
-    assert_eq!(contract.methods[0].name, "read_file");
-    assert_eq!(contract.methods[1].docs, "Persist file bytes");
+fn upstream_value() -> Value {
+    serde_json::from_str(UPSTREAM_FIXTURE).expect("upstream fixture decodes as JSON")
 }
 
-#[test]
-fn json_loader_rejects_garbage() {
-    let loader = JsonServiceLoader::default();
-    let err = loader.load(b"not json").unwrap_err();
-    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
+fn hermes_artifact() -> ContractArtifact {
+    let upstream = upstream_artifact();
+    assert_eq!(upstream.version, ContractFormat::Iris, "upstream fixture stays an Iris artifact");
+    seal_hermes_artifact(&upstream)
 }
 
-#[test]
-fn json_loader_parses_service_projection_artifact() {
-    let loader = JsonServiceLoader::default();
-    let artifact = loader.load_artifact(SERVICE_ARTIFACT.as_bytes()).expect("service projection parses");
-    assert_eq!(artifact.services.len(), 2);
+fn hermes_fixture_json() -> String {
+    hermes_artifact().to_json().expect("Hermes artifact serializes")
 }
 
-#[test]
-fn json_loader_parses_operation_projection_artifact() {
-    let loader = JsonServiceLoader::default();
-    let artifact = loader.load_operation_artifact(OPERATION_ARTIFACT.as_bytes()).expect("operation projection parses");
-    assert_eq!(artifact.operations.len(), 3);
+fn scalar(value: CanonicalScalar) -> ResolvedCanonicalType {
+    ResolvedCanonicalType::Scalar(value)
 }
 
-// --- Registry ?? ------------------------------------------------------
-
-#[test]
-fn registry_registers_and_finds() {
-    let loader = JsonServiceLoader::default();
-    let contract = loader.load(&sample_contract_artifact()).unwrap();
-
-    let mut registry = BTreeServiceRegistry::default();
-    registry.register(contract.clone()).expect("first register ok");
-
-    let found = registry.find("hermes.rpc.FileService").expect("should find");
-    assert_eq!(found, &contract);
-
-    let method = registry.method("hermes.rpc.FileService", "write_file").expect("should find method");
-    assert_eq!(method.response_type, "WriteResult");
-}
-
-#[test]
-fn registry_rejects_duplicate_service_name() {
-    let loader = JsonServiceLoader::default();
-    let contract = loader.load(&sample_contract_artifact()).unwrap();
-
-    let mut registry = BTreeServiceRegistry::default();
-    registry.register(contract.clone()).unwrap();
-    let err = registry.register(contract).unwrap_err();
-    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
-    assert!(err.message().clone().contains("already registered"));
-}
-
-#[test]
-fn registry_returns_none_for_unknown_service() {
-    let registry = BTreeServiceRegistry::default();
-    assert!(registry.find("no.such.Service").is_none());
-    assert!(registry.method("no.such.Service", "x").is_none());
-}
-
-#[test]
-fn registry_all_lists_registered() {
-    let mut registry = BTreeServiceRegistry::default();
-
-    let a = HermesServiceContract {
-        service_name: "svc.A".into(),
-        methods: vec![HermesMethodDescriptor {
-            name: "ping".into(),
-            request_type: "Ping".into(),
-            response_type: "Pong".into(),
-            docs: String::new(),
-        }],
-        revision: None,
-    };
-    let b = HermesServiceContract { service_name: "svc.B".into(), methods: vec![], revision: None };
-
-    registry.register(a).unwrap();
-    registry.register(b).unwrap();
-    assert_eq!(registry.all().len(), 2);
-}
-
-#[test]
-fn registry_register_artifact_bulk_registers_all_services() {
-    let loader = JsonServiceLoader::default();
-    let artifact = loader.load_artifact(SERVICE_ARTIFACT.as_bytes()).expect("service projection parses");
-
-    let mut registry = BTreeServiceRegistry::default();
-    registry.register_artifact(&artifact).expect("bulk register ok");
-
-    assert_eq!(registry.all().len(), 2);
-
-    // canonical path join ? service_name
-    let fs = registry.find("hermes.rpc.FileService").expect("FileService registered under canonical name");
-    assert!(fs.methods.is_empty(), "projection stage ?? methods");
-
-    let notify = registry.find("hermes.rpc.Notify").expect("Notify registered under canonical name");
-    assert!(notify.methods.is_empty());
-}
-
-#[test]
-fn registry_rejects_duplicate_service_from_artifact() {
-    let loader = JsonServiceLoader::default();
-    let artifact = loader.load_artifact(SERVICE_ARTIFACT.as_bytes()).expect("service projection parses");
-
-    let mut registry = BTreeServiceRegistry::default();
-    registry.register_artifact(&artifact).unwrap();
-
-    // ????? ?? ?? service_name ????
-    let err = registry.register_artifact(&artifact).unwrap_err();
-    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
-    assert!(err.message().clone().contains("already registered"));
-}
-
-#[test]
-fn registry_register_operation_artifact_bulk_registers_all_operations() {
-    let loader = JsonServiceLoader::default();
-    let artifact = loader.load_operation_artifact(OPERATION_ARTIFACT.as_bytes()).expect("operation projection parses");
-
-    let mut registry = BTreeServiceRegistry::default();
-    registry.register_operation_artifact(&artifact).expect("bulk register ok");
-
-    assert_eq!(registry.all_operations().len(), 3);
-
-    // ? operation_id ??
-    let op_a = registry.find_operation("op_bcbc253a76d10ef5").expect("operation A found");
-    assert_eq!(op_a.name, "A");
-    assert_eq!(op_a.kind, OperationKind::Query);
-
-    // ? name ??
-    let op_b = registry.find_operation_by_name("B").expect("operation B found by name");
-    assert_eq!(op_b.operation_id, "op_b6c3f1b0a7481391");
-    assert_eq!(op_b.kind, OperationKind::Udf);
-
-    // unknown operation_id
-    assert!(registry.find_operation("op_nonexistent000").is_none());
-    assert!(registry.find_operation_by_name("NoSuchOp").is_none());
-}
-
-#[test]
-fn registry_rejects_duplicate_operation() {
-    let loader = JsonServiceLoader::default();
-    let artifact = loader.load_operation_artifact(OPERATION_ARTIFACT.as_bytes()).expect("operation projection parses");
-
-    let mut registry = BTreeServiceRegistry::default();
-    registry.register_operation_artifact(&artifact).unwrap();
-
-    let err = registry.register_operation_artifact(&artifact).unwrap_err();
-    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
-    assert!(err.message().clone().contains("already registered"));
-}
-
-// --- ???????? service + operation artifact ----------------------
-
-#[test]
-fn registry_loads_service_and_operation_artifacts_together() {
-    let loader = JsonServiceLoader::default();
-
-    let svc = loader.load_artifact(SERVICE_ARTIFACT.as_bytes()).expect("service projection parses");
-    let ops = loader.load_operation_artifact(OPERATION_ARTIFACT.as_bytes()).expect("operation projection parses");
-
-    let mut registry = BTreeServiceRegistry::default();
-    registry.register_artifact(&svc).expect("services ok");
-    registry.register_operation_artifact(&ops).expect("operations ok");
-
-    // services ??
-    assert!(registry.find("hermes.rpc.FileService").is_some());
-    assert!(registry.find("hermes.rpc.Notify").is_some());
-    assert_eq!(registry.all().len(), 2);
-
-    // operations ????
-    assert!(registry.find_operation("op_bcbc253a76d10ef5").is_some());
-    assert!(registry.find_operation_by_name("A").is_some());
-    assert_eq!(registry.all_operations().len(), 3);
-}
-
-// =======================================================================
-// HermesDispatcher ?????
-// =======================================================================
-
-/// ????? artifact ?? A?B ???? EchoHandler / AddHandler?
-fn dispatcher_with_handlers() -> HermesDispatcher {
-    let mut dispatcher = HermesDispatcher::new();
-    dispatcher.load_service_artifact(SERVICE_ARTIFACT).expect("service artifact ok");
-    dispatcher.load_operation_artifact(OPERATION_ARTIFACT).expect("operation artifact ok");
-
-    dispatcher.register_handler("op_bcbc253a76d10ef5", Box::new(EchoHandler)).expect("register EchoHandler for A");
-    dispatcher.register_handler("op_b6c3f1b0a7481391", Box::new(AddHandler)).expect("register AddHandler for B");
-
-    dispatcher
-}
-
-#[test]
-fn dispatcher_dispatch_by_id_returns_handler_result() {
-    let dispatcher = dispatcher_with_handlers();
-
-    // EchoHandler: A 没有声明参数与返回类型，wire 参数原样回显。
-    let params = serde_json::json!({});
-    let got = dispatcher.dispatch("op_bcbc253a76d10ef5", &params).expect("dispatch A ok");
-    assert_eq!(got, params);
-
-    // AddHandler: B 的 `i64` 参数/返回按 codec 走 JSON string。
-    let got = dispatcher.dispatch("op_b6c3f1b0a7481391", &serde_json::json!({"a": "3", "b": "4"})).expect("dispatch B ok");
-    assert_eq!(got, serde_json::json!("7"));
-}
-
-#[test]
-fn dispatcher_dispatch_by_name_routes_to_correct_operation() {
-    let dispatcher = dispatcher_with_handlers();
-
-    let got = dispatcher.dispatch_by_name("A", &serde_json::json!({})).expect("dispatch_by_name A ok");
-    assert_eq!(got, serde_json::json!({}));
-
-    let got = dispatcher.dispatch_by_name("B", &serde_json::json!({"a": "10", "b": "20"})).expect("dispatch_by_name B ok");
-    assert_eq!(got, serde_json::json!("30"));
-}
-
-#[test]
-fn dispatcher_dispatch_without_handler_returns_error() {
-    let dispatcher = dispatcher_with_handlers();
-
-    // fixture C?micro???? handler
-    let err = dispatcher.dispatch("op_fe2999f6bcf707d1", &serde_json::json!({})).unwrap_err();
-    assert_eq!(err.code(), RpcErrorCode::HandlerNotRegistered);
-    assert!(err.message().clone().contains("handler not registered"));
-}
-
-#[test]
-fn dispatcher_dispatch_unknown_operation_returns_error() {
-    let dispatcher = dispatcher_with_handlers();
-
-    let err = dispatcher.dispatch("op_0000000000000000", &serde_json::json!({})).unwrap_err();
-    assert_eq!(err.code(), RpcErrorCode::UnknownOperation);
-    assert!(err.message().clone().contains("operation not found"));
-}
-
-#[test]
-fn dispatcher_dispatch_by_name_unknown_returns_error() {
-    let dispatcher = dispatcher_with_handlers();
-
-    let err = dispatcher.dispatch_by_name("NoSuchOperation", &serde_json::json!({})).unwrap_err();
-    assert_eq!(err.code(), RpcErrorCode::UnknownOperation);
-    assert!(err.message().clone().contains("operation not found by name"));
-}
-
-#[test]
-fn dispatch_request_response_roundtrip_and_success_path() {
-    use hermes_runtime::{HermesDispatchRequest, HermesDispatchResponse};
-
-    let dispatcher = dispatcher_with_handlers();
-
-    // operation 用 operation_id 时按 id 路由。
-    let req = HermesDispatchRequest { operation: "op_bcbc253a76d10ef5".into(), params: serde_json::json!({}) };
-    let resp = dispatcher.dispatch_request(&req);
-    assert!(resp.result.is_some(), "success path should carry result");
-    assert!(resp.error.is_none());
-    assert_eq!(resp.operation_id, "op_bcbc253a76d10ef5");
-    assert_eq!(resp.result.as_ref().unwrap(), &req.params);
-
-    // roundtrip via JSON
-    let resp_json = serde_json::to_string(&resp).expect("serialize response");
-    let roundtrip: HermesDispatchResponse = serde_json::from_str(&resp_json).expect("deserialize response");
-    assert_eq!(roundtrip, resp);
-
-    let req_json = serde_json::to_string(&req).expect("serialize request");
-    let roundtrip_req: HermesDispatchRequest = serde_json::from_str(&req_json).expect("deserialize request");
-    assert_eq!(roundtrip_req, req);
-
-    // operation ? name ? dispatch_by_name ??
-    let req_name = HermesDispatchRequest { operation: "B".into(), params: serde_json::json!({"a": "1", "b": "2"}) };
-    let resp_name = dispatcher.dispatch_request(&req_name);
-    assert!(resp_name.result.is_some());
-    assert_eq!(resp_name.operation_id, "op_b6c3f1b0a7481391");
-    assert_eq!(resp_name.result.as_ref().unwrap(), &serde_json::json!("3"));
-
-    // handler ??? ? response ???? error ??
-    let req_no_handler = HermesDispatchRequest { operation: "op_fe2999f6bcf707d1".into(), params: serde_json::json!({}) };
-    let resp_no_handler = dispatcher.dispatch_request(&req_no_handler);
-    assert!(resp_no_handler.result.is_none());
-    let wire_error = resp_no_handler.error.as_ref().expect("error should be present");
-    assert_eq!(wire_error.code(), RpcErrorCode::HandlerNotRegistered);
-    assert!(wire_error.message().contains("handler not registered"));
-    assert_eq!(resp_no_handler.operation_id, "op_fe2999f6bcf707d1");
-
-    // wire ??????`{"code": "...", "message": "..."}`
-    let wire_json = serde_json::to_value(&resp_no_handler).expect("serialize response");
-    assert_eq!(wire_json["error"]["code"], serde_json::json!("handler-not-registered"));
-}
-
-// --- register_handler ???? -------------------------------------------
-
-#[test]
-fn register_handler_rejects_malformed_operation_id() {
-    let mut dispatcher = HermesDispatcher::new();
-    dispatcher.load_operation_artifact(OPERATION_ARTIFACT).unwrap();
-
-    let err = dispatcher.register_handler("bad_id", Box::new(EchoHandler)).unwrap_err();
-    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
-    assert!(err.message().clone().contains("operation_id malformed"));
-}
-
-#[test]
-fn register_handler_rejects_nonexistent_operation() {
-    let mut dispatcher = HermesDispatcher::new();
-    dispatcher.load_operation_artifact(OPERATION_ARTIFACT).unwrap();
-
-    let err = dispatcher.register_handler("op_0000000000000000", Box::new(EchoHandler)).unwrap_err();
-    assert_eq!(err.code(), RpcErrorCode::UnknownOperation);
-    assert!(err.message().clone().contains("not found in registry"));
-}
-
-// --- handler ?????? -------------------------------------------------
-
-#[test]
-fn add_handler_reports_invalid_request_for_missing_param() {
-    let dispatcher = dispatcher_with_handlers();
-
-    let err = dispatcher.dispatch("op_b6c3f1b0a7481391", &serde_json::json!({"a": "1"})).unwrap_err();
-    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
-    assert!(err.message().clone().contains("missing parameter `b`"));
-}
-
-#[test]
-fn rpc_error_code_wire_names_are_kebab_case() {
-    let codes = [
-        (RpcErrorCode::ArtifactCorrupt, "artifact-corrupt"),
-        (RpcErrorCode::UnknownOperation, "unknown-operation"),
-        (RpcErrorCode::HandlerNotRegistered, "handler-not-registered"),
-        (RpcErrorCode::DuplicateRegistration, "duplicate-registration"),
-        (RpcErrorCode::InvalidRequest, "invalid-request"),
-        (RpcErrorCode::UnsupportedCodec, "unsupported-codec"),
-        (RpcErrorCode::HandlerFailed, "handler-failed"),
-        (RpcErrorCode::DeadlineExceeded, "deadline-exceeded"),
-        (RpcErrorCode::Cancelled, "cancelled"),
-        (RpcErrorCode::Internal, "internal"),
-    ];
-    for (code, expected) in codes {
-        assert_eq!(code.as_str(), expected);
-        assert_eq!(serde_json::to_string(&code).unwrap(), format!("\"{expected}\""));
+fn type_key(ty: &ResolvedCanonicalType) -> String {
+    match ty {
+        ResolvedCanonicalType::Scalar(value) => value.as_str().to_string(),
+        ResolvedCanonicalType::User { path, type_id } => format!("{}#{type_id}", path.join("::")),
+        ResolvedCanonicalType::Reference(inner) => format!("&{}", type_key(inner)),
+        ResolvedCanonicalType::Optional(inner) => format!("{}?", type_key(inner)),
+        ResolvedCanonicalType::List(inner) => format!("[{}]", type_key(inner)),
+        ResolvedCanonicalType::Generic { path, .. } => path.join("::"),
     }
 }
 
-// --- ?????deadline / cancellation / ???? -------------------------
-
-const OP_A: &str = "op_bcbc253a76d10ef5";
-
-fn dispatcher_with(handler: Box<dyn HermesOperationHandler>) -> HermesDispatcher {
-    let mut dispatcher = HermesDispatcher::new();
-    dispatcher.load_operation_artifact(OPERATION_ARTIFACT).expect("operation artifact ok");
-    dispatcher.register_handler(OP_A, handler).expect("register handler");
-    dispatcher
+fn operation(
+    namespace: &[&str],
+    name: &str,
+    parameters: Vec<(&str, ResolvedCanonicalType)>,
+    result_type: Option<ResolvedCanonicalType>,
+) -> OperationContract {
+    let namespace = namespace.iter().map(|segment| segment.to_string()).collect::<Vec<_>>();
+    let parameter_keys = parameters
+        .iter()
+        .map(|(name, ty)| OperationParameterKey::new(name, &type_key(ty)).expect("parameter key"))
+        .collect::<Vec<_>>();
+    let result_key = result_type.as_ref().map(type_key).unwrap_or_else(|| "unit".to_string());
+    let identity = OperationIdentityKey::new(&namespace, OperationKind::Query, name, parameter_keys, &result_key)
+        .expect("operation identity key");
+    OperationContract {
+        operation_id: OperationId::derive(&identity),
+        kind: OperationKind::Query,
+        name: name.to_string(),
+        canonical_path: identity.canonical_path.clone(),
+        parameters: parameters
+            .into_iter()
+            .map(|(name, canonical_type)| OperationParameterContract { name: name.to_string(), canonical_type })
+            .collect(),
+        cardinality: OperationContract::cardinality_of(&result_type),
+        result_type,
+        effect: OperationEffect::Pure,
+        capabilities: Vec::new(),
+        source_unit_id: 0,
+        span: (0..0usize).into(),
+    }
 }
 
-/// ?? deadline ? handler???????????? handler ???
+fn method(
+    service_id: &ServiceId,
+    name: &str,
+    request_type: ResolvedCanonicalType,
+    response_type: ResolvedCanonicalType,
+    stream: MethodStreamMode,
+    operation_id: &OperationId,
+) -> ServiceMethodContract {
+    let identity = MethodIdentityKey::new(service_id.clone(), name).expect("method identity key");
+    ServiceMethodContract {
+        method_id: MethodId::derive(&identity),
+        name: name.to_string(),
+        request_type,
+        response_type,
+        stream,
+        operation_id: operation_id.clone(),
+    }
+}
+
+fn service(path: &[&str], methods: Vec<ServiceMethodContract>) -> ServiceContract {
+    let canonical_path = path.iter().map(|segment| segment.to_string()).collect::<Vec<_>>();
+    let name = canonical_path.last().cloned().unwrap_or_default();
+    ServiceContract {
+        service_id: ServiceId::derive(&ServiceIdentityKey::new(canonical_path.clone()).expect("service key")),
+        name,
+        canonical_path,
+        methods,
+        source_unit_id: 0,
+        span: (0..0usize).into(),
+    }
+}
+
+fn artifact(operations: Vec<OperationContract>, services: Vec<ServiceContract>) -> ContractArtifact {
+    ContractArtifact::seal(
+        ContractFormat::Hermes,
+        ContractProducer::new("hermes-tests", "0"),
+        ContractPayload { operations, services },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// handler stubs
+// ---------------------------------------------------------------------------
+
+struct CreateHandler;
+
+impl HermesOperationHandler for CreateHandler {
+    fn execute(
+        &self,
+        _ctx: &hermes_runtime::CallContext,
+        _operation: &OperationContract,
+        _params: &Value,
+    ) -> RpcResult<OperationReply> {
+        Ok(OperationReply::Unary(json!({ "id": USER_ID, "displayName": "Ada" })))
+    }
+}
+
+struct LookupHandler;
+
+impl HermesOperationHandler for LookupHandler {
+    fn execute(
+        &self,
+        _ctx: &hermes_runtime::CallContext,
+        _operation: &OperationContract,
+        _params: &Value,
+    ) -> RpcResult<OperationReply> {
+        Ok(OperationReply::ServerStream(vec![json!({ "id": USER_ID }), Value::Null]))
+    }
+}
+
+struct WrongCreateReply;
+
+impl HermesOperationHandler for WrongCreateReply {
+    fn execute(
+        &self,
+        _ctx: &hermes_runtime::CallContext,
+        _operation: &OperationContract,
+        _params: &Value,
+    ) -> RpcResult<OperationReply> {
+        Ok(OperationReply::Unary(json!("not-an-object")))
+    }
+}
+
+struct StreamOnUnary;
+
+impl HermesOperationHandler for StreamOnUnary {
+    fn execute(
+        &self,
+        _ctx: &hermes_runtime::CallContext,
+        _operation: &OperationContract,
+        _params: &Value,
+    ) -> RpcResult<OperationReply> {
+        Ok(OperationReply::ServerStream(vec![json!({ "id": USER_ID })]))
+    }
+}
+
+struct UnaryOnStream;
+
+impl HermesOperationHandler for UnaryOnStream {
+    fn execute(
+        &self,
+        _ctx: &hermes_runtime::CallContext,
+        _operation: &OperationContract,
+        _params: &Value,
+    ) -> RpcResult<OperationReply> {
+        Ok(OperationReply::Unary(json!({ "id": USER_ID })))
+    }
+}
+
+/// sleep 越过 deadline 的 handler。
 struct SlowHandler {
     delay: Duration,
 }
@@ -484,33 +219,33 @@ struct SlowHandler {
 impl HermesOperationHandler for SlowHandler {
     fn execute(
         &self,
-        _ctx: &CallContext,
-        _projection: &OperationProjection,
-        _params: &serde_json::Value,
-    ) -> RpcResult<serde_json::Value> {
+        _ctx: &hermes_runtime::CallContext,
+        _operation: &OperationContract,
+        _params: &Value,
+    ) -> RpcResult<OperationReply> {
         thread::sleep(self.delay);
-        Ok(serde_json::json!({"slow": true}))
+        Ok(OperationReply::Unary(json!({ "id": USER_ID })))
     }
 }
 
-/// ???????? handler?
+/// 主动取消自身调用的 handler。
 struct CancelHandler;
 
 impl HermesOperationHandler for CancelHandler {
     fn execute(
         &self,
-        ctx: &CallContext,
-        _projection: &OperationProjection,
-        _params: &serde_json::Value,
-    ) -> RpcResult<serde_json::Value> {
+        ctx: &hermes_runtime::CallContext,
+        _operation: &OperationContract,
+        _params: &Value,
+    ) -> RpcResult<OperationReply> {
         if let Some(token) = ctx.token() {
             token.cancel();
         }
-        Ok(serde_json::json!({"cancelled_self": true}))
+        Ok(OperationReply::Unary(json!({ "id": USER_ID })))
     }
 }
 
-/// ??????????? gate ????
+/// 占住并发许可直到 gate 放行的 handler。
 struct HoldHandler {
     started: mpsc::Sender<()>,
     gate: Arc<(Mutex<bool>, Condvar)>,
@@ -519,17 +254,17 @@ struct HoldHandler {
 impl HermesOperationHandler for HoldHandler {
     fn execute(
         &self,
-        _ctx: &CallContext,
-        _projection: &OperationProjection,
-        _params: &serde_json::Value,
-    ) -> RpcResult<serde_json::Value> {
+        _ctx: &hermes_runtime::CallContext,
+        _operation: &OperationContract,
+        _params: &Value,
+    ) -> RpcResult<OperationReply> {
         let _ = self.started.send(());
         let (lock, condvar) = &*self.gate;
         let mut open = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         while !*open {
             open = condvar.wait(open).unwrap_or_else(|poisoned| poisoned.into_inner());
         }
-        Ok(serde_json::json!({"held": true}))
+        Ok(OperationReply::Unary(json!({ "id": USER_ID })))
     }
 }
 
@@ -539,312 +274,527 @@ fn release_gate(gate: &Arc<(Mutex<bool>, Condvar)>) {
     condvar.notify_all();
 }
 
+fn dispatcher_with_handlers() -> HermesDispatcher {
+    let mut dispatcher = HermesDispatcher::new();
+    dispatcher.load_contract_artifact(&hermes_fixture_json()).expect("Hermes fixture loads");
+    dispatcher.register_handler(CREATE_OP, Box::new(CreateHandler)).expect("create handler");
+    dispatcher.register_handler(LOOKUP_OP, Box::new(LookupHandler)).expect("lookup handler");
+    dispatcher
+}
+
+fn create_params() -> Value {
+    json!({ "request": { "email": "ada@example.com" } })
+}
+
+fn lookup_params() -> Value {
+    json!({ "id": USER_ID })
+}
+
+// ---------------------------------------------------------------------------
+// envelope：格式、版本、指纹与诊断码
+// ---------------------------------------------------------------------------
+
+#[test]
+fn upstream_fixture_round_trips_through_hermes_envelope() {
+    let upstream = upstream_artifact();
+    let hermes = seal_hermes_artifact(&upstream);
+
+    assert_eq!(hermes.fingerprint, upstream.fingerprint, "fingerprint is derived by upstream, not Hermes");
+    assert_eq!(hermes.version, ContractFormat::Hermes);
+
+    let reparsed = parse_contract_artifact(&hermes.to_json().expect("serialize")).expect("Hermes artifact loads");
+    assert_eq!(reparsed, hermes);
+    assert_eq!(reparsed.payload, upstream.payload, "payload is field-for-field the upstream payload");
+}
+
+#[test]
+fn loader_accepts_only_the_hermes_contract_format() {
+    let err = parse_contract_artifact(UPSTREAM_FIXTURE).expect_err("Iris artifact is rejected by Hermes");
+    assert_eq!(err.code(), RpcErrorCode::ArtifactCorrupt);
+    assert_eq!(err.diagnostic_code(), Some("ART010"));
+    assert!(err.message().contains("vos/hermes.contract/v0"));
+}
+
+#[test]
+fn loader_rejects_unknown_contract_version() {
+    let mut value = upstream_value();
+    value["version"] = json!("vos/hermes.contract/v1");
+    let err = parse_contract_artifact(&value.to_string()).expect_err("unknown version rejected");
+    assert_eq!(err.diagnostic_code(), Some("ART010"));
+}
+
+#[test]
+fn loader_rejects_unknown_fields() {
+    let mut value = upstream_value();
+    value["version"] = json!("vos/hermes.contract/v0");
+    value["futureField"] = json!(true);
+    let err = parse_contract_artifact(&value.to_string()).expect_err("unknown field rejected");
+    assert_eq!(err.diagnostic_code(), Some("ART010"));
+}
+
+fn hermes_value() -> Value {
+    let mut value = upstream_value();
+    value["version"] = json!("vos/hermes.contract/v0");
+    value
+}
+
+#[test]
+fn loader_rejects_fingerprint_mismatch() {
+    let mut value = hermes_value();
+    value["fingerprint"] = json!("0".repeat(64));
+    let err = parse_contract_artifact(&value.to_string()).expect_err("fingerprint mismatch rejected");
+    assert_eq!(err.code(), RpcErrorCode::ArtifactCorrupt);
+    assert_eq!(err.diagnostic_code(), Some("ART020"));
+}
+
+#[test]
+fn loader_rejects_missing_producer_version() {
+    let mut value = hermes_value();
+    value["producer"]["version"] = json!("");
+    let err = parse_contract_artifact(&value.to_string()).expect_err("producer version required");
+    assert_eq!(err.diagnostic_code(), Some("ART021"));
+}
+
+#[test]
+fn loader_preserves_payload_diagnostic_codes() {
+    let mut payload: ContractPayload = serde_json::from_value(upstream_value()["payload"].clone()).expect("payload decodes");
+    payload.services[0].service_id =
+        ServiceId::parse(&format!("svc_{}", "0".repeat(64))).expect("well-formed but mismatched service id");
+    let artifact = ContractArtifact::seal(ContractFormat::Hermes, ContractProducer::new("fixture", "0"), payload);
+
+    let err = parse_contract_artifact(&artifact.to_json().expect("seal")).expect_err("mismatched service id rejected");
+    assert_eq!(err.code(), RpcErrorCode::ArtifactCorrupt);
+    assert_eq!(err.diagnostic_code(), Some("SVC013"), "payload diagnostics keep their upstream code");
+}
+
+// ---------------------------------------------------------------------------
+// registry：解析与冲突检测
+// ---------------------------------------------------------------------------
+
+#[test]
+fn registry_resolves_service_method_to_method_and_operation_identity() {
+    let mut registry = ContractRegistry::new();
+    registry.register_artifact(&hermes_artifact()).expect("fixture registers");
+
+    assert_eq!(registry.service_count(), 1);
+    assert_eq!(registry.operation_count(), 2);
+    assert_eq!(registry.service_names(), vec!["IdentityService"]);
+
+    let create = registry.resolve("IdentityService", "create").expect("create resolves");
+    assert_eq!(create.method_id().as_str(), CREATE_METHOD);
+    assert_eq!(create.operation_id().as_str(), CREATE_OP);
+    assert_eq!(create.stream(), MethodStreamMode::Unary);
+
+    let lookup = registry.resolve("IdentityService", "lookup").expect("lookup resolves");
+    assert_eq!(lookup.method_id().as_str(), LOOKUP_METHOD);
+    assert_eq!(lookup.operation_id().as_str(), LOOKUP_OP);
+    assert_eq!(lookup.stream(), MethodStreamMode::ServerStream);
+}
+
+#[test]
+fn registry_lookup_failures_are_structured_and_never_guess() {
+    let mut registry = ContractRegistry::new();
+    registry.register_artifact(&hermes_artifact()).expect("fixture registers");
+
+    let service = registry.resolve("IdentityService", "missing").expect_err("unknown method");
+    assert_eq!(service.code(), RpcErrorCode::UnknownMethod);
+
+    let unknown = registry.resolve("NoSuchService", "create").expect_err("unknown service");
+    assert_eq!(unknown.code(), RpcErrorCode::UnknownService);
+}
+
+#[test]
+fn registry_rejects_duplicate_service_name() {
+    let op_a = operation(&["a"], "go", vec![], Some(scalar(CanonicalScalar::Utf8)));
+    let op_b = operation(&["b"], "go", vec![], Some(scalar(CanonicalScalar::Utf8)));
+    let service_a = service(
+        &["a", "Echo"],
+        vec![method(
+            &service_id(&["a", "Echo"]),
+            "go",
+            scalar(CanonicalScalar::Utf8),
+            scalar(CanonicalScalar::Utf8),
+            MethodStreamMode::Unary,
+            &op_a.operation_id,
+        )],
+    );
+    let service_b = service(
+        &["b", "Echo"],
+        vec![method(
+            &service_id(&["b", "Echo"]),
+            "go",
+            scalar(CanonicalScalar::Utf8),
+            scalar(CanonicalScalar::Utf8),
+            MethodStreamMode::Unary,
+            &op_b.operation_id,
+        )],
+    );
+
+    let mut registry = ContractRegistry::new();
+    let err = registry
+        .register_artifact(&artifact(vec![op_a, op_b], vec![service_a, service_b]))
+        .expect_err("duplicate service name rejected");
+    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
+    assert!(err.message().contains("service name `Echo`"));
+}
+
+#[test]
+fn registry_rejects_duplicate_method_name() {
+    let op_a = operation(&["a"], "first", vec![], None);
+    let op_b = operation(&["a"], "second", vec![], None);
+    let owner = service_id(&["a", "Echo"]);
+    let svc = service(
+        &["a", "Echo"],
+        vec![
+            method(
+                &owner,
+                "go",
+                scalar(CanonicalScalar::Utf8),
+                scalar(CanonicalScalar::Utf8),
+                MethodStreamMode::Unary,
+                &op_a.operation_id,
+            ),
+            method(
+                &owner,
+                "go",
+                scalar(CanonicalScalar::Utf8),
+                scalar(CanonicalScalar::Utf8),
+                MethodStreamMode::Unary,
+                &op_b.operation_id,
+            ),
+        ],
+    );
+
+    let mut registry = ContractRegistry::new();
+    let err = registry.register_artifact(&artifact(vec![op_a, op_b], vec![svc])).expect_err("duplicate method name rejected");
+    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
+    assert!(err.message().contains("method name `Echo.go`"));
+}
+
+#[test]
+fn registry_rejects_method_bound_to_missing_operation() {
+    let owner = service_id(&["a", "Echo"]);
+    let missing = OperationId::parse(UNKNOWN_OP).expect("well-formed unknown id");
+    let svc = service(
+        &["a", "Echo"],
+        vec![method(
+            &owner,
+            "go",
+            scalar(CanonicalScalar::Utf8),
+            scalar(CanonicalScalar::Utf8),
+            MethodStreamMode::Unary,
+            &missing,
+        )],
+    );
+
+    let mut registry = ContractRegistry::new();
+    let err = registry.register_artifact(&artifact(vec![], vec![svc])).expect_err("missing operation rejected");
+    assert_eq!(err.code(), RpcErrorCode::MissingOperationBinding);
+}
+
+#[test]
+fn registry_rejects_duplicate_registration_of_the_same_artifact() {
+    let mut registry = ContractRegistry::new();
+    registry.register_artifact(&hermes_artifact()).expect("first register");
+    let err = registry.register_artifact(&hermes_artifact()).expect_err("second register rejected");
+    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
+}
+
+#[test]
+fn registry_rejects_non_hermes_artifacts() {
+    let mut registry = ContractRegistry::new();
+    let err = registry.register_artifact(&upstream_artifact()).expect_err("Iris artifact rejected");
+    assert_eq!(err.code(), RpcErrorCode::ArtifactCorrupt);
+    assert_eq!(err.diagnostic_code(), Some("ART010"));
+}
+
+fn service_id(path: &[&str]) -> ServiceId {
+    let path = path.iter().map(|segment| segment.to_string()).collect::<Vec<_>>();
+    ServiceId::derive(&ServiceIdentityKey::new(path).expect("service identity key"))
+}
+
+// ---------------------------------------------------------------------------
+// dispatch：unary / server-stream 与类型校验
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dispatch_routes_unary_and_server_stream_from_the_upstream_fixture() {
+    let dispatcher = dispatcher_with_handlers();
+
+    let unary = dispatcher.dispatch("IdentityService", "create", &create_params()).expect("unary dispatch");
+    assert_eq!(unary, DispatchReply::Unary(json!({ "id": USER_ID, "displayName": "Ada" })));
+
+    let stream = dispatcher.dispatch("IdentityService", "lookup", &lookup_params()).expect("stream dispatch");
+    assert_eq!(stream, DispatchReply::ServerStream(vec![json!({ "id": USER_ID }), Value::Null]));
+}
+
+#[test]
+fn dispatch_request_returns_wire_envelope_with_resolved_identities() {
+    let dispatcher = dispatcher_with_handlers();
+    let request = HermesDispatchRequest::new("IdentityService", "create", create_params());
+
+    let response = dispatcher.dispatch_request(&request);
+    assert_eq!(response.service(), "IdentityService");
+    assert_eq!(response.method(), "create");
+    assert_eq!(response.operation_id(), Some(CREATE_OP));
+    assert_eq!(response.method_id(), Some(CREATE_METHOD));
+    assert_eq!(response.result(), Some(&json!({ "id": USER_ID, "displayName": "Ada" })));
+    assert_eq!(response.payload_count(), 1);
+
+    let roundtrip: HermesDispatchResponse =
+        serde_json::from_str(&serde_json::to_string(&response).expect("serialize")).expect("deserialize");
+    assert_eq!(roundtrip, response);
+
+    let error = dispatcher.dispatch_request(&HermesDispatchRequest::new("Nope", "create", json!({})));
+    assert!(error.operation_id().is_none());
+    assert_eq!(error.error().expect("error").code(), RpcErrorCode::UnknownService);
+    let wire = serde_json::to_value(&error).expect("serialize error envelope");
+    assert_eq!(wire["error"]["code"], json!("unknown-service"));
+    assert!(wire.get("result").is_none());
+}
+
+#[test]
+fn dispatch_rejects_mistyped_missing_and_extra_parameters() {
+    let dispatcher = dispatcher_with_handlers();
+
+    let mistyped = dispatcher.dispatch("IdentityService", "lookup", &json!({ "id": 7 })).expect_err("uuid is a string");
+    assert_eq!(mistyped.code(), RpcErrorCode::InvalidRequest);
+    assert!(mistyped.message().contains("must be JSON string"));
+
+    let missing = dispatcher.dispatch("IdentityService", "lookup", &json!({})).expect_err("missing param");
+    assert_eq!(missing.code(), RpcErrorCode::InvalidRequest);
+    assert!(missing.message().contains("missing parameter `id`"));
+
+    let extra =
+        dispatcher.dispatch("IdentityService", "lookup", &json!({ "id": USER_ID, "extra": 1 })).expect_err("extra param");
+    assert_eq!(extra.code(), RpcErrorCode::InvalidRequest);
+    assert!(extra.message().contains("unknown parameter `extra`"));
+
+    let not_object = dispatcher.dispatch("IdentityService", "create", &json!([])).expect_err("params must be object");
+    assert_eq!(not_object.code(), RpcErrorCode::InvalidRequest);
+    assert!(not_object.message().contains("params must be a JSON object"));
+}
+
+#[test]
+fn dispatch_rejects_handler_reply_that_does_not_match_the_declared_result_type() {
+    let mut dispatcher = HermesDispatcher::new();
+    dispatcher.load_contract_artifact(&hermes_fixture_json()).expect("fixture loads");
+    dispatcher.register_handler(CREATE_OP, Box::new(WrongCreateReply)).expect("handler");
+
+    let err = dispatcher.dispatch("IdentityService", "create", &create_params()).expect_err("result type mismatch");
+    assert_eq!(err.code(), RpcErrorCode::HandlerFailed);
+    assert!(err.message().contains("must be JSON object"));
+}
+
+#[test]
+fn dispatch_rejects_stream_mode_mismatch_in_both_directions() {
+    let mut unary_service = HermesDispatcher::new();
+    unary_service.load_contract_artifact(&hermes_fixture_json()).expect("fixture loads");
+    unary_service.register_handler(CREATE_OP, Box::new(StreamOnUnary)).expect("handler");
+    let err = unary_service.dispatch("IdentityService", "create", &create_params()).expect_err("stream on unary");
+    assert_eq!(err.code(), RpcErrorCode::StreamModeMismatch);
+    assert!(err.message().contains("is unary but the handler returned a server stream"));
+
+    let mut stream_service = HermesDispatcher::new();
+    stream_service.load_contract_artifact(&hermes_fixture_json()).expect("fixture loads");
+    stream_service.register_handler(LOOKUP_OP, Box::new(UnaryOnStream)).expect("handler");
+    let err = stream_service.dispatch("IdentityService", "lookup", &lookup_params()).expect_err("unary on stream");
+    assert_eq!(err.code(), RpcErrorCode::StreamModeMismatch);
+    assert!(err.message().contains("is server-stream but the handler returned one value"));
+}
+
+#[test]
+fn dispatch_rejects_missing_handler_and_malformed_handler_registration() {
+    let mut dispatcher = HermesDispatcher::new();
+    dispatcher.load_contract_artifact(&hermes_fixture_json()).expect("fixture loads");
+    dispatcher.register_handler(CREATE_OP, Box::new(CreateHandler)).expect("handler");
+
+    let err = dispatcher.dispatch("IdentityService", "lookup", &lookup_params()).expect_err("no lookup handler");
+    assert_eq!(err.code(), RpcErrorCode::HandlerNotRegistered);
+
+    let malformed = dispatcher.register_handler("op_short", Box::new(EchoHandler)).expect_err("malformed id");
+    assert_eq!(malformed.code(), RpcErrorCode::InvalidRequest);
+
+    let unknown = dispatcher.register_handler(UNKNOWN_OP, Box::new(EchoHandler)).expect_err("unknown operation");
+    assert_eq!(unknown.code(), RpcErrorCode::UnknownOperation);
+}
+
+#[test]
+fn dispatch_rejects_generic_types_without_a_wire_codec() {
+    let boxed = ResolvedCanonicalType::Generic {
+        path: vec!["Box".to_string()],
+        arguments: vec![hermes_runtime::ResolvedCanonicalTypeArgument::Type(scalar(CanonicalScalar::Utf8))],
+    };
+    let op = operation(&["a"], "reject", vec![("value", boxed.clone())], Some(scalar(CanonicalScalar::Utf8)));
+    let owner = service_id(&["a", "Reject"]);
+    let svc = service(
+        &["a", "Reject"],
+        vec![method(&owner, "reject", boxed, scalar(CanonicalScalar::Utf8), MethodStreamMode::Unary, &op.operation_id)],
+    );
+
+    let mut registry = ContractRegistry::new();
+    registry.register_artifact(&artifact(vec![op.clone()], vec![svc])).expect("contract registers");
+    let mut dispatcher = HermesDispatcher::with_registry(registry);
+    dispatcher.register_handler(op.operation_id.as_str(), Box::new(EchoHandler)).expect("handler");
+
+    let err = dispatcher.dispatch("Reject", "reject", &json!({ "value": "x" })).expect_err("generic rejected");
+    assert_eq!(err.code(), RpcErrorCode::UnsupportedCodec);
+    assert!(err.message().contains("unsupported codec for type `Box<utf8>`"));
+}
+
+#[test]
+fn scalar_codec_table_covers_all_nineteen_typed_variants() {
+    let mapped = CanonicalScalar::ALL
+        .into_iter()
+        .map(|scalar| (scalar, hermes_runtime::codec_for(&ResolvedCanonicalType::Scalar(scalar)).expect("scalar codec")))
+        .collect::<Vec<_>>();
+    assert_eq!(mapped.len(), 19);
+    assert_eq!(hermes_runtime::codec_for(&scalar(CanonicalScalar::Utf8)).unwrap(), hermes_runtime::WireCodec::Utf8);
+    assert_eq!(hermes_runtime::codec_for(&scalar(CanonicalScalar::Utf16)).unwrap(), hermes_runtime::WireCodec::Utf16);
+    assert_eq!(hermes_runtime::codec_for(&scalar(CanonicalScalar::I64)).unwrap(), hermes_runtime::WireCodec::Int64);
+    assert_eq!(hermes_runtime::codec_for(&scalar(CanonicalScalar::U64)).unwrap(), hermes_runtime::WireCodec::Uint64);
+    assert_eq!(hermes_runtime::codec_for(&scalar(CanonicalScalar::Decimal)).unwrap(), hermes_runtime::WireCodec::Decimal);
+    assert_eq!(
+        hermes_runtime::codec_for(&scalar(CanonicalScalar::I32)).unwrap(),
+        hermes_runtime::WireCodec::Integer { min: i64::from(i32::MIN), max: i64::from(i32::MAX) }
+    );
+    assert_ne!(
+        hermes_runtime::codec_for(&scalar(CanonicalScalar::I32)).unwrap(),
+        hermes_runtime::codec_for(&scalar(CanonicalScalar::I64)).unwrap()
+    );
+}
+
+#[test]
+fn add_handler_uses_contract_parameter_types() {
+    let op_a = operation(
+        &["a"],
+        "add",
+        vec![("a", scalar(CanonicalScalar::I64)), ("b", scalar(CanonicalScalar::I64))],
+        Some(scalar(CanonicalScalar::I64)),
+    );
+    let owner = service_id(&["a", "Calc"]);
+    let svc = service(
+        &["a", "Calc"],
+        vec![method(
+            &owner,
+            "add",
+            scalar(CanonicalScalar::I64),
+            scalar(CanonicalScalar::I64),
+            MethodStreamMode::Unary,
+            &op_a.operation_id,
+        )],
+    );
+
+    let mut registry = ContractRegistry::new();
+    registry.register_artifact(&artifact(vec![op_a.clone()], vec![svc])).expect("contract registers");
+    let mut dispatcher = HermesDispatcher::with_registry(registry);
+    dispatcher.register_handler(op_a.operation_id.as_str(), Box::new(AddHandler)).expect("handler");
+
+    let reply = dispatcher.dispatch("Calc", "add", &json!({ "a": "3", "b": "4" })).expect("add dispatch");
+    assert_eq!(reply, DispatchReply::Unary(json!("7")));
+
+    let err = dispatcher.dispatch("Calc", "add", &json!({ "a": 3, "b": "4" })).expect_err("i64 must be a string");
+    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
+}
+
+// ---------------------------------------------------------------------------
+// lifecycle：deadline、取消与并发上限
+// ---------------------------------------------------------------------------
+
+fn lifecycle_dispatcher(handler: Box<dyn HermesOperationHandler>) -> HermesDispatcher {
+    let mut dispatcher = HermesDispatcher::new();
+    dispatcher.load_contract_artifact(&hermes_fixture_json()).expect("fixture loads");
+    dispatcher.register_handler(CREATE_OP, handler).expect("handler");
+    dispatcher
+}
+
 #[test]
 fn dispatch_with_expired_deadline_returns_deadline_exceeded() {
-    let dispatcher = dispatcher_with(Box::new(EchoHandler));
+    let dispatcher = lifecycle_dispatcher(Box::new(CreateHandler));
     let options = CallOptions::with_deadline(Instant::now() - Duration::from_millis(1));
 
-    let err = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).unwrap_err();
+    let err = dispatcher.dispatch_with("IdentityService", "create", &create_params(), &options).unwrap_err();
     assert_eq!(err.code(), RpcErrorCode::DeadlineExceeded);
 }
 
 #[test]
-fn dispatch_within_deadline_returns_result() {
-    let dispatcher = dispatcher_with(Box::new(EchoHandler));
-    let options = CallOptions::with_timeout(Duration::from_secs(30));
-
-    let got = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).unwrap();
-    assert_eq!(got, serde_json::json!({}));
-}
-
-#[test]
-fn dispatch_times_out_when_handler_outlives_deadline() {
-    let dispatcher = dispatcher_with(Box::new(SlowHandler { delay: Duration::from_millis(80) }));
+fn dispatch_times_out_when_handler_outlives_the_deadline() {
+    let dispatcher = lifecycle_dispatcher(Box::new(SlowHandler { delay: Duration::from_millis(80) }));
     let options = CallOptions::with_timeout(Duration::from_millis(10));
 
-    let err = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).unwrap_err();
+    let err = dispatcher.dispatch_with("IdentityService", "create", &create_params(), &options).unwrap_err();
     assert_eq!(err.code(), RpcErrorCode::DeadlineExceeded);
 }
 
 #[test]
-fn dispatch_with_cancelled_token_returns_cancelled() {
-    let dispatcher = dispatcher_with(Box::new(EchoHandler));
+fn dispatch_with_cancelled_token_and_handler_initiated_cancel_return_cancelled() {
+    let dispatcher = lifecycle_dispatcher(Box::new(CreateHandler));
     let token = CancelToken::new();
     token.cancel();
     let options = CallOptions::new().and_cancellation(token);
-
-    let err = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).unwrap_err();
+    let err = dispatcher.dispatch_with("IdentityService", "create", &create_params(), &options).unwrap_err();
     assert_eq!(err.code(), RpcErrorCode::Cancelled);
-}
 
-#[test]
-fn handler_can_cancel_its_own_call() {
-    let dispatcher = dispatcher_with(Box::new(CancelHandler));
+    let dispatcher = lifecycle_dispatcher(Box::new(CancelHandler));
     let options = CallOptions::new().and_cancellation(CancelToken::new());
-
-    let err = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).unwrap_err();
+    let err = dispatcher.dispatch_with("IdentityService", "create", &create_params(), &options).unwrap_err();
     assert_eq!(err.code(), RpcErrorCode::Cancelled);
 }
 
 #[test]
-fn concurrency_limit_queues_until_permit_released() {
+fn concurrency_limit_queues_until_the_permit_is_released() {
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let (started, started_rx) = mpsc::channel();
 
-    let mut dispatcher = dispatcher_with(Box::new(HoldHandler { started, gate: gate.clone() }));
+    let mut dispatcher = lifecycle_dispatcher(Box::new(HoldHandler { started, gate: gate.clone() }));
     dispatcher.set_max_concurrency(Some(1));
     assert_eq!(dispatcher.max_concurrency(), Some(1));
 
     let dispatcher = Arc::new(dispatcher);
     let background = {
         let dispatcher = Arc::clone(&dispatcher);
-        thread::spawn(move || dispatcher.dispatch(OP_A, &serde_json::json!({})))
+        thread::spawn(move || dispatcher.dispatch("IdentityService", "create", &create_params()))
     };
-    started_rx.recv_timeout(Duration::from_secs(5)).expect("handler should have started");
+    started_rx.recv_timeout(Duration::from_secs(5)).expect("handler started");
 
-    // ??????????????? deadline??? deadline-exceeded
     let options = CallOptions::with_timeout(Duration::from_millis(30));
-    let err = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).unwrap_err();
+    let err = dispatcher
+        .dispatch_with("IdentityService", "create", &create_params(), &options)
+        .expect_err("second call waits for the permit");
     assert_eq!(err.code(), RpcErrorCode::DeadlineExceeded);
 
     release_gate(&gate);
-    let held = background.join().expect("background thread joins").expect("held dispatch succeeds");
-    assert_eq!(held, serde_json::json!({"held": true}));
+    let held = background.join().expect("background joins").expect("held dispatch succeeds");
+    assert!(matches!(held, DispatchReply::Unary(_)));
 
-    // 许可归还后同一参数再次通过。
     let options = CallOptions::with_timeout(Duration::from_millis(500));
-    let got = dispatcher.dispatch_with(OP_A, &serde_json::json!({}), &options).expect("permit released");
-    assert_eq!(got, serde_json::json!({"held": true}));
+    dispatcher.dispatch_with("IdentityService", "create", &create_params(), &options).expect("permit released");
 }
 
-// =======================================================================
-// codec：canonical type → wire 表达
-// =======================================================================
-
-/// fixture operation artifact：列表 / 可选参数与未知 Named / Generic。
-const CODEC_ARTIFACT: &str = r#"{
-    "envelope": {
-        "stage": "operation-syntax-projection",
-        "contractFormatVersion": "vos-operation-contract-v0",
-        "languageVersion": "vos-language-v0",
-        "canonicalizationVersion": "vos-canonical-v0",
-        "schemaFingerprint": null,
-        "sourceUnits": [{
-            "sourceUnitId": 0,
-            "source": "query Join(items: List<i64>, suffix: Optional<utf8>): List<utf8>\nquery RejectNamed(x: Missing): utf8\nquery RejectGeneric(x: Box<utf8>): utf8"
-        }]
-    },
-    "operations": [
-        {
-            "kind": "query",
-            "name": "Join",
-            "identityKey": "query:Join(items:List<i64>,suffix:Optional<utf8>)->List<utf8>",
-            "operationId": "op_f5a61512f163f99c",
-            "parameters": [
-                {"name": "items", "typeExpr": {"list": {"named": ["i64"]}}, "span": {"start": 11, "end": 16}},
-                {"name": "suffix", "typeExpr": {"optional": {"named": ["utf8"]}}, "span": {"start": 29, "end": 35}}
-            ],
-            "returnType": {"list": {"named": ["utf8"]}},
-            "signature": null,
-            "body": null,
-            "span": {"start": 0, "end": 64}
-        },
-        {
-            "kind": "query",
-            "name": "RejectNamed",
-            "identityKey": "query:RejectNamed(x:Missing)->utf8",
-            "operationId": "op_ecdcd0a1a4f7ef39",
-            "parameters": [
-                {"name": "x", "typeExpr": {"named": ["Missing"]}, "span": {"start": 82, "end": 83}}
-            ],
-            "returnType": {"named": ["utf8"]},
-            "signature": null,
-            "body": null,
-            "span": {"start": 65, "end": 100}
-        },
-        {
-            "kind": "query",
-            "name": "RejectGeneric",
-            "identityKey": "query:RejectGeneric(x:Box<utf8>)->utf8",
-            "operationId": "op_319f00a433994c58",
-            "parameters": [
-                {
-                    "name": "x",
-                    "typeExpr": {"generic": {"path": ["Box"], "arguments": [{"type": {"named": ["utf8"]}}]}},
-                    "span": {"start": 120, "end": 121}
-                }
-            ],
-            "returnType": {"named": ["utf8"]},
-            "signature": null,
-            "body": null,
-            "span": {"start": 101, "end": 140}
-        }
-    ]
-}"#;
-
-/// 把 handler 看到的 `items`（`i64` wire 字符串）拼上 `suffix` 后返回。
-struct JoinHandler;
-
-impl HermesOperationHandler for JoinHandler {
-    fn execute(
-        &self,
-        _ctx: &CallContext,
-        _projection: &OperationProjection,
-        params: &serde_json::Value,
-    ) -> RpcResult<serde_json::Value> {
-        let items = params.get("items").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
-        let suffix = params.get("suffix").and_then(serde_json::Value::as_str).unwrap_or_default();
-        let joined = items
-            .into_iter()
-            .map(|item| serde_json::Value::String(format!("{}{suffix}", item.as_str().unwrap_or_default())))
-            .collect();
-        Ok(serde_json::Value::Array(joined))
-    }
-}
-
-/// 返回 JSON number 的 handler，用于验证返回类型 codec 校验。
-struct NumericReturnHandler;
-
-impl HermesOperationHandler for NumericReturnHandler {
-    fn execute(
-        &self,
-        _ctx: &CallContext,
-        _projection: &OperationProjection,
-        _params: &serde_json::Value,
-    ) -> RpcResult<serde_json::Value> {
-        Ok(serde_json::json!(7))
-    }
-}
-
-fn codec_dispatcher() -> HermesDispatcher {
-    let mut dispatcher = HermesDispatcher::new();
-    dispatcher.load_operation_artifact(CODEC_ARTIFACT).expect("codec artifact ok");
-    dispatcher.register_handler("op_f5a61512f163f99c", Box::new(JoinHandler)).expect("register JoinHandler");
-    dispatcher.register_handler("op_ecdcd0a1a4f7ef39", Box::new(EchoHandler)).expect("register RejectNamed handler");
-    dispatcher.register_handler("op_319f00a433994c58", Box::new(EchoHandler)).expect("register RejectGeneric handler");
-    dispatcher
-}
+// ---------------------------------------------------------------------------
+// wire 错误码
+// ---------------------------------------------------------------------------
 
 #[test]
-fn codec_decodes_list_and_optional_parameters() {
-    let dispatcher = codec_dispatcher();
-
-    let got = dispatcher
-        .dispatch_by_name("Join", &serde_json::json!({"items": ["1", "2", "3"], "suffix": "!"}))
-        .expect("list + optional dispatch ok");
-    assert_eq!(got, serde_json::json!(["1!", "2!", "3!"]));
-
-    // 可选参数为 null 时 handler 看到 null。
-    let got = dispatcher
-        .dispatch_by_name("Join", &serde_json::json!({"items": ["1"], "suffix": null}))
-        .expect("optional null dispatch ok");
-    assert_eq!(got, serde_json::json!(["1"]));
-}
-
-#[test]
-fn codec_i64_wire_string_reaches_handler_unchanged() {
-    let dispatcher = codec_dispatcher();
-
-    // handler 侧的 JoinHandler 以字符串拼接，证明 `i64` 在 handler 里仍是 wire string。
-    let got = dispatcher
-        .dispatch_by_name("Join", &serde_json::json!({"items": ["-9223372036854775808"], "suffix": ""}))
-        .expect("i64 boundary dispatch ok");
-    assert_eq!(got, serde_json::json!(["-9223372036854775808"]));
-}
-
-#[test]
-fn codec_rejects_missing_extra_and_mistyped_parameters() {
-    let dispatcher = dispatcher_with_handlers();
-
-    let missing = dispatcher.dispatch_by_name("B", &serde_json::json!({"a": "1"})).unwrap_err();
-    assert_eq!(missing.code(), RpcErrorCode::InvalidRequest);
-    assert!(missing.message().contains("missing parameter `b`"));
-
-    let extra = dispatcher.dispatch_by_name("A", &serde_json::json!({"x": 1})).unwrap_err();
-    assert_eq!(extra.code(), RpcErrorCode::InvalidRequest);
-    assert!(extra.message().contains("unknown parameter `x`"));
-
-    let mistyped = dispatcher.dispatch_by_name("B", &serde_json::json!({"a": 1, "b": "2"})).unwrap_err();
-    assert_eq!(mistyped.code(), RpcErrorCode::InvalidRequest);
-    assert!(mistyped.message().contains("parameter `a` must be JSON string"));
-
-    let not_object = dispatcher.dispatch_by_name("A", &serde_json::json!([])).unwrap_err();
-    assert_eq!(not_object.code(), RpcErrorCode::InvalidRequest);
-    assert!(not_object.message().contains("params must be a JSON object"));
-}
-
-#[test]
-fn codec_rejects_unknown_named_and_generic_types() {
-    let dispatcher = codec_dispatcher();
-
-    let named = dispatcher.dispatch_by_name("RejectNamed", &serde_json::json!({"x": "1"})).unwrap_err();
-    assert_eq!(named.code(), RpcErrorCode::UnsupportedCodec);
-    assert!(named.message().contains("unsupported codec for type `Missing`"));
-
-    let generic = dispatcher.dispatch_by_name("RejectGeneric", &serde_json::json!({"x": "1"})).unwrap_err();
-    assert_eq!(generic.code(), RpcErrorCode::UnsupportedCodec);
-    assert!(generic.message().contains("unsupported codec for type `Box<utf8>`"));
-}
-
-#[test]
-fn codec_unsupported_error_shape_matches_wire_body() {
-    let dispatcher = codec_dispatcher();
-
-    let request =
-        hermes_runtime::HermesDispatchRequest { operation: "RejectNamed".into(), params: serde_json::json!({"x": "1"}) };
-    let response = dispatcher.dispatch_request(&request);
-
-    let wire = serde_json::to_value(&response).expect("serialize response");
-    assert_eq!(wire["error"]["code"], serde_json::json!("unsupported-codec"));
-    assert!(wire["error"]["message"].as_str().is_some_and(|message| message.contains("Missing")));
-    assert_eq!(wire["operationId"], serde_json::json!("op_ecdcd0a1a4f7ef39"));
-    assert!(wire.get("result").is_none());
-}
-
-#[test]
-fn codec_rejects_mistyped_return_value() {
-    let mut dispatcher = HermesDispatcher::new();
-    dispatcher.load_operation_artifact(OPERATION_ARTIFACT).expect("operation artifact ok");
-    dispatcher.register_handler("op_b6c3f1b0a7481391", Box::new(NumericReturnHandler)).expect("register numeric handler");
-
-    let err = dispatcher.dispatch_by_name("B", &serde_json::json!({"a": "1", "b": "2"})).unwrap_err();
-    assert_eq!(err.code(), RpcErrorCode::HandlerFailed);
-    assert!(err.message().contains("return value must be JSON string"));
-}
-
-#[test]
-fn codec_table_covers_scalars_and_rejects_any() {
-    let named = |name: &str| CanonicalType::Named(vec![name.to_string()]);
-
-    assert_eq!(codec_for(&named("bool")).unwrap(), WireCodec::Bool);
-    assert_eq!(codec_for(&named("utf8")).unwrap(), WireCodec::Utf8);
-    assert_eq!(codec_for(&named("i32")).unwrap(), WireCodec::Integer { min: i64::from(i32::MIN), max: i64::from(i32::MAX) });
-    assert_eq!(codec_for(&named("f64")).unwrap(), WireCodec::Float);
-    assert_eq!(codec_for(&named("i64")).unwrap(), WireCodec::Int64);
-    assert_eq!(codec_for(&named("u64")).unwrap(), WireCodec::Uint64);
-    assert_eq!(codec_for(&named("int")).unwrap(), WireCodec::IntegerString);
-    assert_eq!(codec_for(&named("decimal")).unwrap(), WireCodec::Decimal);
-    assert_eq!(codec_for(&named("uuid")).unwrap(), WireCodec::Uuid);
-    assert_eq!(codec_for(&named("date")).unwrap(), WireCodec::Date);
-    assert_eq!(codec_for(&named("time")).unwrap(), WireCodec::Time);
-    assert_eq!(codec_for(&named("datetime")).unwrap(), WireCodec::DateTime);
-    assert_eq!(codec_for(&named("datetimeUtc")).unwrap(), WireCodec::DateTimeUtc);
-    assert_eq!(codec_for(&named("bytes")).unwrap(), WireCodec::Bytes);
-    assert_eq!(
-        codec_for(&CanonicalType::Optional(Box::new(named("utf8")))).unwrap(),
-        WireCodec::Optional(Box::new(WireCodec::Utf8))
-    );
-    assert_eq!(
-        codec_for(&CanonicalType::List(Box::new(named("i64")))).unwrap(),
-        WireCodec::List(Box::new(WireCodec::Int64))
-    );
-    assert_eq!(
-        codec_for(&CanonicalType::Reference(Box::new(named("uuid")))).unwrap(),
-        WireCodec::Uuid
-    );
-
-    for unsupported in ["json", "value", "any", "Missing"] {
-        let err = codec_for(&named(unsupported)).unwrap_err();
-        assert_eq!(err.code(), RpcErrorCode::UnsupportedCodec);
+fn rpc_error_code_wire_names_are_kebab_case() {
+    let codes = [
+        (RpcErrorCode::ArtifactCorrupt, "artifact-corrupt"),
+        (RpcErrorCode::UnknownService, "unknown-service"),
+        (RpcErrorCode::UnknownMethod, "unknown-method"),
+        (RpcErrorCode::UnknownOperation, "unknown-operation"),
+        (RpcErrorCode::MissingOperationBinding, "missing-operation-binding"),
+        (RpcErrorCode::HandlerNotRegistered, "handler-not-registered"),
+        (RpcErrorCode::DuplicateRegistration, "duplicate-registration"),
+        (RpcErrorCode::InvalidRequest, "invalid-request"),
+        (RpcErrorCode::UnsupportedCodec, "unsupported-codec"),
+        (RpcErrorCode::HandlerFailed, "handler-failed"),
+        (RpcErrorCode::StreamModeMismatch, "stream-mode-mismatch"),
+        (RpcErrorCode::DeadlineExceeded, "deadline-exceeded"),
+        (RpcErrorCode::Cancelled, "cancelled"),
+        (RpcErrorCode::Internal, "internal"),
+    ];
+    for (code, expected) in codes {
+        assert_eq!(code.as_str(), expected);
+        assert_eq!(serde_json::to_string(&code).unwrap(), format!("\"{expected}\""));
     }
 }

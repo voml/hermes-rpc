@@ -1,36 +1,51 @@
-//! Hermes 内部的服务 / 方法占位描述。
+//! Hermes 合同 envelope 的加载与校验。
 //!
-//! method 合同归上游 VOS 语言标准（`vos-language` 的 service projection）。
-//! 上游 method 级 projection 交付前，`HermesMethodDescriptor` 只是 registry 的
-//! 占位形状，不构成按 `service.method` 路由的能力。
+//! 合同类型、identity、fingerprint 与 canonical type 全部来自上游 `vos-types`
+//! （`vos-language`），本 crate 不定义任何语义副本。Hermes 只消费
+//! `vos/hermes.contract/v0`：其他产品格式、未知版本、未知字段与指纹不匹配都在
+//! 加载期拒绝，并保留上游诊断码（`ART010` / `ART020` / `ART021` 与 payload 的
+//! `OPC` / `SVC` 码）。
+//!
+//! 合同不携带 VOS body，Hermes 也不会重新解析 VOS 源文本补齐信息。
 
-use serde::{Deserialize, Serialize};
+use std::path::Path;
 
-/// Hermes 端内部的服务描述。
+use vos_types::ContractArtifact;
+
+use crate::error::{RpcError, RpcErrorCode, RpcResult};
+
+/// Hermes 接受的唯一合同格式。
+pub const HERMES_CONTRACT_FORMAT: &str = "vos/hermes.contract/v0";
+
+/// 解析并校验一份 Hermes 合同 artifact。
 ///
-/// 真实消费主链是 `vos_types::ServiceProjectionArtifact`（与上游
-/// `ServiceProjectionArtifact` 对齐）。本结构体是 registry 的存储形状。
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HermesServiceContract {
-    /// 服务的全局唯一名称（例如 `"hermes.rpc.FileService"`）。
-    pub service_name: String,
-    /// 服务暴露的所有方法。
-    pub methods: Vec<HermesMethodDescriptor>,
-    /// artifact 元信息（来源版本、revision 等）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<String>,
+/// 先按 serde 解码（未知字段与未知格式版本 → `ART010`），再确认产品格式是
+/// Hermes（其他格式仍按 `ART010` 拒绝），最后执行上游 payload 校验（指纹
+/// `ART020`、producer `ART021`、合同内部 `OPC` / `SVC` 码）。
+pub fn parse_contract_artifact(json: &str) -> RpcResult<ContractArtifact> {
+    let artifact: ContractArtifact = serde_json::from_str(json)
+        .map_err(|error| RpcError::new(RpcErrorCode::ArtifactCorrupt, error.to_string()).with_diagnostic_code("ART010"))?;
+    if artifact.version.as_str() != HERMES_CONTRACT_FORMAT {
+        return Err(RpcError::new(
+            RpcErrorCode::ArtifactCorrupt,
+            format!("Hermes accepts only `{HERMES_CONTRACT_FORMAT}`, found `{}`", artifact.version.as_str()),
+        )
+        .with_diagnostic_code("ART010"));
+    }
+    artifact.validate().map_err(RpcError::from_artifact)?;
+    Ok(artifact)
 }
 
-/// 单个 RPC 方法的占位描述。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HermesMethodDescriptor {
-    /// 方法名。
-    pub name: String,
-    /// 请求体的类型名（对应 VOS schema 中的 type）。
-    pub request_type: String,
-    /// 响应体的类型名。
-    pub response_type: String,
-    /// 可选的方法文档字符串。
-    #[serde(default)]
-    pub docs: String,
+/// 从文件读取一份 Hermes 合同 artifact。
+pub fn read_contract_artifact(path: &Path) -> RpcResult<ContractArtifact> {
+    let json = std::fs::read_to_string(path)?;
+    parse_contract_artifact(&json)
+}
+
+/// 把合同 payload 重新封装成 Hermes artifact。
+///
+/// 只用于已经按上游规则校验过的 payload：fingerprint 由上游
+/// `ContractArtifact::seal` 重新计算，Hermes 不参与指纹推导。
+pub fn seal_hermes_artifact(artifact: &ContractArtifact) -> ContractArtifact {
+    ContractArtifact::seal(vos_types::ContractFormat::Hermes, artifact.producer.clone(), artifact.payload.clone())
 }
