@@ -95,7 +95,7 @@ pub(crate) fn build(artifact: &OperationProjectionArtifact) -> Result<Bindings, 
             raw_name: operation.name.clone(),
             method_name: camel_case(&operation.name),
             type_name,
-            operation_id: operation.operation_id.clone(),
+            operation_id: operation.operation_id.to_string(),
             params,
             result,
         });

@@ -1,4 +1,7 @@
 //! `hermes-generator` 的生成计划、渲染与落盘测试。
+//!
+//! Fixture 直接由上游 `vos-types` 的投影类型构造：`identity` 是结构化 key，
+//! `operationId` 是 64 hex 的 durable id，二者都由上游规则派生，测试不手拼。
 
 use std::{
     fs,
@@ -7,65 +10,90 @@ use std::{
 };
 
 use hermes_generator::{FileOwnership, GeneratorError, generate, generate_from_json};
-use vos_types::{CanonicalType, OperationProjectionArtifact};
+use vos_types::{
+    CANONICALIZATION_VERSION, CanonicalType, ContractEnvelope, LANGUAGE_VERSION, OPERATION_CONTRACT_FORMAT_VERSION,
+    OPERATION_PROJECTION_STAGE, OperationIdentityKey, OperationKind, OperationParameter, OperationParameterKey,
+    OperationProjection, OperationProjectionArtifact, SourceUnit, canonical_type_key,
+};
 
-/// 三个 operation：带参数的 query、带返回值的 udf、无返回值的 micro。
-///
-/// span 与 `sourceUnits[0].source` 的字节位置一一对应，保证 artifact 通过校验。
-const FIXTURE: &str = r#"{
-  "envelope": {
-    "stage": "operation-syntax-projection",
-    "contractFormatVersion": "vos-operation-contract-v0",
-    "languageVersion": "vos-language-v0",
-    "canonicalizationVersion": "vos-canonical-v0",
-    "schemaFingerprint": null,
-    "sourceUnits": [{
-      "sourceUnitId": 0,
-      "source": "query Find(a: int, b: utf8): bool\nudf Ping(): utf8\nmicro Reset()"
-    }]
-  },
-  "operations": [
-    {
-      "kind": "query",
-      "name": "Find",
-      "identityKey": "query:Find(a:int,b:utf8)->bool",
-      "operationId": "op_9fd56a2e3c3df8d8",
-      "parameters": [
-        {"name": "a", "typeExpr": {"named": ["int"]}, "span": {"start": 11, "end": 12}},
-        {"name": "b", "typeExpr": {"named": ["utf8"]}, "span": {"start": 19, "end": 20}}
-      ],
-      "returnType": {"named": ["bool"]},
-      "signature": null,
-      "body": null,
-      "span": {"start": 0, "end": 33}
-    },
-    {
-      "kind": "udf",
-      "name": "Ping",
-      "identityKey": "udf:Ping()->utf8",
-      "operationId": "op_4499bae698e1e66b",
-      "parameters": [],
-      "returnType": {"named": ["utf8"]},
-      "signature": null,
-      "body": null,
-      "span": {"start": 34, "end": 50}
-    },
-    {
-      "kind": "micro",
-      "name": "Reset",
-      "identityKey": "micro:Reset()",
-      "operationId": "op_047d2ef6137266b7",
-      "parameters": [],
-      "returnType": null,
-      "signature": null,
-      "body": null,
-      "span": {"start": 51, "end": 64}
+const SOURCE: &str = "query Find(a: int, b: utf8): bool\nudf Ping(): utf8\nmicro Reset()";
+
+fn span_of(needle: &str) -> std::ops::Range<usize> {
+    let start = SOURCE.find(needle).unwrap_or_else(|| panic!("source contains {needle}"));
+    start..start + needle.len()
+}
+
+fn operation(
+    kind: OperationKind,
+    name: &str,
+    parameters: Vec<(&str, CanonicalType, std::ops::Range<usize>)>,
+    return_type: Option<CanonicalType>,
+    span: std::ops::Range<usize>,
+) -> OperationProjection {
+    let parameter_keys = parameters
+        .iter()
+        .map(|(name, ty, _)| OperationParameterKey::new(name, &canonical_type_key(ty)).expect("parameter key"))
+        .collect::<Vec<_>>();
+    let result_key = return_type.as_ref().map(canonical_type_key).unwrap_or_else(|| "unit".to_string());
+    let identity =
+        OperationIdentityKey::new(&[name.to_string()], kind, name, parameter_keys, &result_key).expect("operation identity");
+    OperationProjection {
+        kind,
+        name: name.to_string(),
+        canonical_path: identity.canonical_path.clone(),
+        operation_id: vos_types::OperationId::derive(&identity),
+        identity,
+        parameters: parameters
+            .into_iter()
+            .map(|(name, type_expr, span)| OperationParameter { name: name.to_string(), type_expr, span: span.into() })
+            .collect(),
+        return_type,
+        signature: None,
+        body: None,
+        span: span.into(),
     }
-  ]
-}"#;
+}
 
 fn parsed_artifact() -> OperationProjectionArtifact {
-    OperationProjectionArtifact::from_json(FIXTURE).expect("fixture should be a valid artifact")
+    OperationProjectionArtifact {
+        envelope: ContractEnvelope {
+            stage: OPERATION_PROJECTION_STAGE.to_string(),
+            contract_format_version: OPERATION_CONTRACT_FORMAT_VERSION.to_string(),
+            language_version: LANGUAGE_VERSION.to_string(),
+            canonicalization_version: CANONICALIZATION_VERSION.to_string(),
+            schema_fingerprint: None,
+            source_units: vec![SourceUnit { source_unit_id: 0, source: SOURCE.to_string() }],
+        },
+        operations: vec![
+            operation(
+                OperationKind::Query,
+                "Find",
+                vec![
+                    ("a", CanonicalType::Named(vec!["int".to_string()]), span_of("a: int")),
+                    ("b", CanonicalType::Named(vec!["utf8".to_string()]), span_of("b: utf8")),
+                ],
+                Some(CanonicalType::Named(vec!["bool".to_string()])),
+                sub_source("query Find(a: int, b: utf8): bool"),
+            ),
+            operation(
+                OperationKind::Udf,
+                "Ping",
+                Vec::new(),
+                Some(CanonicalType::Named(vec!["utf8".to_string()])),
+                sub_source("udf Ping(): utf8"),
+            ),
+            operation(OperationKind::Micro, "Reset", Vec::new(), None, sub_source("micro Reset()")),
+        ],
+    }
+}
+
+fn sub_source(declaration: &str) -> std::ops::Range<usize> {
+    let start = SOURCE.find(declaration).unwrap_or_else(|| panic!("source contains {declaration}"));
+    start..start + declaration.len()
+}
+
+fn fixture_json() -> String {
+    parsed_artifact().to_json().expect("artifact serializes")
 }
 
 fn contents_of<'a>(plan: &'a hermes_generator::GenerationPlan, path: &str) -> &'a str {
@@ -79,14 +107,18 @@ fn temp_root(tag: &str) -> PathBuf {
     root
 }
 
+fn operation_id(index: usize) -> String {
+    parsed_artifact().operations[index].operation_id.to_string()
+}
+
 // --- 计划形状 -----------------------------------------------------------
 
 #[test]
 fn plan_contains_generated_client_server_and_one_template() {
-    let plan = generate_from_json(FIXTURE).expect("generation succeeds");
+    let plan = generate_from_json(&fixture_json()).expect("generation succeeds");
 
     assert_eq!(plan.files().len(), 3);
-    assert_eq!(contents_of(&plan, "hermes/operations.ts").is_empty(), false);
+    assert!(!contents_of(&plan, "hermes/operations.ts").is_empty());
 
     let ownership: Vec<_> = plan.files().iter().map(|file| (file.path(), file.ownership())).collect();
     assert_eq!(
@@ -117,8 +149,8 @@ fn client_maps_operation_ids_parameters_and_results() {
     let plan = generate(&parsed_artifact()).expect("generation succeeds");
     let client = contents_of(&plan, "hermes/operations.ts");
 
-    assert!(client.contains("  find: \"op_9fd56a2e3c3df8d8\","));
-    assert!(client.contains("  ping: \"op_4499bae698e1e66b\","));
+    assert!(client.contains(&format!("  find: \"{}\",", operation_id(0))));
+    assert!(client.contains(&format!("  ping: \"{}\",", operation_id(1))));
     // `int` 是未定宽整数，wire 上按字符串承载以避免 JS number 精度丢失
     assert!(client.contains("export type FindParams = {\n  a: string;\n  b: string;\n};"));
     assert!(client.contains("export type PingParams = Record<string, never>;"));
@@ -143,7 +175,7 @@ fn server_binds_handlers_by_operation_id() {
         "import type { FindParams, FindResult, PingParams, PingResult, ResetParams, ResetResult } from \"./operations\";"
     ));
     assert!(server.contains("  find(ctx: HermesHandlerContext, params: FindParams): Promise<FindResult> | FindResult;"));
-    assert!(server.contains("      operationId: \"op_9fd56a2e3c3df8d8\","));
+    assert!(server.contains(&format!("      operationId: \"{}\",", operation_id(0))));
     assert!(server.contains("handler: (ctx, params) => handlers.find(ctx, params as FindParams),"));
 }
 
@@ -232,19 +264,21 @@ fn generated_file_is_rewritten_when_content_changes() {
 
 #[test]
 fn empty_artifact_still_produces_parseable_stub_modules() {
-    const EMPTY: &str = r#"{
-      "envelope": {
-        "stage": "operation-syntax-projection",
-        "contractFormatVersion": "vos-operation-contract-v0",
-        "languageVersion": "vos-language-v0",
-        "canonicalizationVersion": "vos-canonical-v0",
-        "schemaFingerprint": null,
-        "sourceUnits": [{"sourceUnitId": 0, "source": ""}]
-      },
-      "operations": []
-    }"#;
+    let empty = OperationProjectionArtifact {
+        envelope: ContractEnvelope {
+            stage: OPERATION_PROJECTION_STAGE.to_string(),
+            contract_format_version: OPERATION_CONTRACT_FORMAT_VERSION.to_string(),
+            language_version: LANGUAGE_VERSION.to_string(),
+            canonicalization_version: CANONICALIZATION_VERSION.to_string(),
+            schema_fingerprint: None,
+            source_units: vec![SourceUnit { source_unit_id: 0, source: String::new() }],
+        },
+        operations: Vec::new(),
+    }
+    .to_json()
+    .expect("empty artifact serializes");
 
-    let plan = generate_from_json(EMPTY).expect("empty artifact is valid");
+    let plan = generate_from_json(&empty).expect("empty artifact is valid");
     assert!(contents_of(&plan, "hermes/operations.ts").contains("export const operationIds = {\n} as const;"));
     assert!(contents_of(&plan, "hermes/server.ts").contains("export {};"));
     assert!(contents_of(&plan, "hermes/handlers.ts").contains("export {};"));
