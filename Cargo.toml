@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
 # Hermes workspace: RPC domain runtime (`hermes-runtime`), code generator
-# (`hermes-generator`) and N-API binding (`hermes-napi`). VOS projection
+# (`hermes-generator`), N-API binding (`hermes-napi`) and WebAssembly binding
+# (`hermes-wasm`). VOS projection
 # artifacts come from upstream `vos-types` (`vos-language`); Hermes does not
 # vendor a local mirror crate.
 members = [
