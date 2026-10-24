@@ -23,3 +23,15 @@ pnpm-lock.yaml
 target/
 .cargo/config.toml
 Cargo.lock
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+*.pem
+
+# npm placeholder / trust (local only)
+.placeholder-npm-cache.json
+scripts/.placeholder-npm-cache.json
+.cache/npm-placeholder.json
+.env.placeholder.local
