@@ -1,6 +1,6 @@
 {
   "name": "@yydb/hermes-linux-arm64",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Prebuilt Hermes N-API binary for linux-arm64",
   "type": "module",
   "license": "MPL-2.0",
