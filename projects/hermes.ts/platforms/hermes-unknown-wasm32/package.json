@@ -1,6 +1,6 @@
 {
   "name": "@yydb/hermes-unknown-wasm32",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Browser WebAssembly binding for the Hermes RPC runtime (wasm-bindgen artifact)",
   "type": "module",
   "license": "MPL-2.0",
