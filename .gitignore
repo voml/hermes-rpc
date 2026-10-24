@@ -8,20 +8,18 @@ time-travel.*
 .vs/
 .idea/
 *.iml
+*.log
+*.txt
 
 # Node
 node_modules/
 .cache/
-
-# N-API build artifacts
-index.js
-index.d.ts
-projects/packages/*/lib/*.node
-
-# Temp scripts
-_gen_otp.js
-_publish_000.ps1
+/dist
+pnpm-lock.yaml
+*.node
+*.wasm
 
 # Rust
 target/
+.cargo/config.toml
 Cargo.lock

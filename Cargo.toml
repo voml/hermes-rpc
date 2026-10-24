@@ -1,14 +1,13 @@
 [workspace]
 resolver = "2"
-# Hermes workspace: VOS language host (`vos-core`), RPC domain runtime
-# (`hermes-runtime`), the code generator (`hermes-generator`) and the N-API
-# binding (`hermes-napi`).
-# 旧栈（`vos-ast` / `vos-for-rust` / `vos-cli` / `vos-openapi` / `vos-faker`）已冻结并移出 workspace。
+# Hermes workspace: RPC domain runtime (`hermes-runtime`), code generator
+# (`hermes-generator`) and N-API binding (`hermes-napi`). VOS projection
+# artifacts come from upstream `vos-types` (`vos-language`); Hermes does not
+# vendor a local mirror crate.
 members = [
-    "projects/vos-core",
-    "projects/hermes-runtime",
-    "projects/hermes-generator",
-    "projects/hermes-napi",
+    "projects/hermes.rs/crates/hermes-runtime",
+    "projects/hermes.rs/crates/hermes-generator",
+    "projects/hermes.rs/crates/hermes-napi",
 ]
 
 [workspace.package]
@@ -18,6 +17,7 @@ authors = ["Aster <192607617@qq.com>"]
 license = "MPL-2.0"
 
 [workspace.dependencies]
+vos-types = { git = "https://github.com/voml/vos-language.git", branch = "dev" }
 napi = { version = "2", features = ["napi8"] }
 napi-derive = "2"
 serde = { version = "1", features = ["derive"] }

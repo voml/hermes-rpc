@@ -1,6 +1,0 @@
-[registries.crates-io]
-protocol = "sparse"
-
-# 本地 path patch —— 仅本地开发时启用；CI 从 registry 拉取 `vos` 不依赖此 patch。
-# [patch."https://github.com/voml/vos-language.git"]
-# vos = { path = "E:/vmz 全栈开发/vos-language/projects/crates/vos" }

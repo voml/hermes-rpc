@@ -48,9 +48,9 @@ const NATIVE_PLATFORMS = [
 
 /** @type {{ dir: string; publishName?: string }[]} */
 const JS_PACKAGES = [
-    { dir: "projects/packages/hermes-unknown-wasm32" },
-    { dir: "packages/hermes-skills" },
-    { dir: "projects/packages/hermes", publishName: "@yydb/hermes" },
+    { dir: "projects/hermes.ts/platforms/hermes-unknown-wasm32" },
+    { dir: "projects/hermes.ts/packages/hermes-skills" },
+    { dir: "projects/hermes.ts/packages/hermes", publishName: "@yydb/hermes" },
 ];
 
 function fail(msg) {
@@ -221,7 +221,7 @@ function publishNative(version, artifactsRoot) {
     const otherFailed = [];
     for (const plat of NATIVE_PLATFORMS) {
         const name = `@yydb/hermes-${plat.short}`;
-        const packageDir = path.join(ROOT, "projects/packages", `hermes-${plat.short}`);
+        const packageDir = path.join(ROOT, "projects/hermes.ts/platforms", `hermes-${plat.short}`);
         const artDir = path.join(artifactsRoot, plat.short);
         if (!fs.existsSync(artDir)) {
             console.log(` · ${name} no artifact (${plat.short}) — skip`);

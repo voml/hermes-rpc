@@ -1,0 +1,22 @@
+[package]
+name = "hermes-napi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "N-API binding for Hermes RPC dispatch (Node semantic core)"
+repository = "https://github.com/voml/hermes-rpc"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+hermes-runtime = { path = "../hermes-runtime" }
+napi = { workspace = true }
+napi-derive = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"
