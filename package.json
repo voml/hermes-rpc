@@ -7,6 +7,7 @@
         "build:ts": "pnpm --filter @yydb/hermes-unknown-wasm32 build && pnpm --filter @yydb/hermes-language build && pnpm --filter @yydb/hermes build",
         "typecheck:ts": "pnpm -r --filter @yydb/hermes-language --filter @yydb/hermes-unknown-wasm32 --filter @yydb/hermes run typecheck",
         "test:ts": "pnpm -r --filter @yydb/hermes-language --filter @yydb/hermes-unknown-wasm32 --filter @yydb/hermes run test",
+        "test:ci": "node --test scripts/ci/*.test.mjs",
         "test": "cargo test --release",
         "fmt": "cargo fmt --all",
         "push": "wee test && git push",
