@@ -7,10 +7,29 @@
   "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
   "files": [
     "dist",
+    "src",
     "README.md"
   ],
+  "scripts": {
+    "build": "node ./scripts/build-dist.mjs",
+    "prepublishOnly": "node ./scripts/build-dist.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pretest": "node ./scripts/build-dist.mjs",
+    "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.2"
+  },
   "optionalDependencies": {
     "@yydb/hermes-darwin-arm64": "workspace:*",
     "@yydb/hermes-darwin-x64": "workspace:*",
