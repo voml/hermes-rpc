@@ -1,15 +1,33 @@
 {
   "name": "@yydb/hermes-unknown-wasm32",
   "version": "0.0.2",
-  "description": "Hermes WASM fallback for browsers and WASI runtimes",
+  "description": "Browser WebAssembly binding for the Hermes RPC runtime (wasm-bindgen artifact)",
   "type": "module",
   "license": "MPL-2.0",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "sideEffects": ["./src/lib/hermes_wasm.js"],
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./wasm": "./src/lib/hermes_wasm_bg.wasm"
+  },
   "files": [
     "dist",
+    "src",
     "README.md"
   ],
+  "scripts": {
+    "build": "node ./scripts/build-dist.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.2"
+  },
   "publishConfig": {
     "access": "public"
   },

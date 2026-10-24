@@ -11,6 +11,7 @@
     },
     "devDependencies": {
         "@doki-land/nifty": "^0.1.9",
-        "@napi-rs/cli": "^2.16"
+        "@napi-rs/cli": "^2.16",
+        "typescript": "^5.9.2"
     }
 }

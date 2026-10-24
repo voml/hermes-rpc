@@ -1,0 +1,4 @@
+dist/
+# wasm-pack output: keep generated declarations for typecheck, ignore glue and binary.
+src/lib/*
+!src/lib/hermes_wasm.d.ts
