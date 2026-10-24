@@ -1,0 +1,21 @@
+[package]
+name = "hermes-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Browser WebAssembly binding for the Hermes RPC runtime"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hermes-runtime = { path = "../hermes-runtime" }
+vos-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = { workspace = true }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
