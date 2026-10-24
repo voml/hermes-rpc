@@ -22,6 +22,8 @@ pub enum RpcErrorCode {
     DuplicateRegistration,
     /// 请求形状不合法（operation id 畸形、参数无法解码等）。
     InvalidRequest,
+    /// 合同类型没有声明 wire codec，无法安全编解码。
+    UnsupportedCodec,
     /// handler 执行失败。
     HandlerFailed,
     /// dispatch deadline 已过。
@@ -41,6 +43,7 @@ impl RpcErrorCode {
             Self::HandlerNotRegistered => "handler-not-registered",
             Self::DuplicateRegistration => "duplicate-registration",
             Self::InvalidRequest => "invalid-request",
+            Self::UnsupportedCodec => "unsupported-codec",
             Self::HandlerFailed => "handler-failed",
             Self::DeadlineExceeded => "deadline-exceeded",
             Self::Cancelled => "cancelled",

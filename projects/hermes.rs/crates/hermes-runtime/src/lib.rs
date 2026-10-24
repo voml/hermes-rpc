@@ -9,6 +9,7 @@
 
 #![deny(missing_docs)]
 
+pub mod codec;
 pub mod contract;
 pub mod dispatcher;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod registry;
 pub mod wire;
 
 pub use self::{
+    codec::{WireCodec, codec_for, decode_params, decode_value, encode_result, encode_value},
     contract::{HermesMethodDescriptor, HermesServiceContract},
     dispatcher::{HermesDispatcher, HermesOperationHandler},
     error::{RpcError, RpcErrorCode, RpcResult},

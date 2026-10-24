@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use vos_types::{OperationProjectionArtifact, OperationProjection, ServiceProjectionArtifact, OPERATION_ID_PREFIX};
 
 use crate::{
+    codec,
     error::{RpcError, RpcErrorCode, RpcResult},
     lifecycle::{CallContext, CallOptions, InFlightLimiter},
     loader::JsonServiceLoader,
@@ -25,7 +26,8 @@ pub trait HermesOperationHandler: Send + Sync {
     ///
     /// `ctx` 提供 deadline 与取消状态，长耗时 handler 应周期性调用
     /// [`CallContext::check`]。`projection` 提供 operation 的静态声明信息
-    /// （name / kind / parameters 等），`params` 是调用方传过来的 JSON 参数对象。
+    /// （name / kind / parameters 等），`params` 是按 operation 参数 codec 解码后的
+    /// JSON 参数对象。
     fn execute(
         &self,
         ctx: &CallContext,
@@ -148,10 +150,14 @@ impl HermesDispatcher {
 
     /// 按 `operation_id` dispatch，并带上生命周期参数。
     ///
-    /// 顺序：解析 operation → 找 handler → 等并发许可 → handler 执行。
-    /// 取消与 deadline 在每一步之间各检查一次；即使 handler 已返回结果，只要
-    /// 期间超时或被取消，仍返回 `deadline-exceeded` / `cancelled`，避免调用方
-    /// 拿到已经过期的响应。
+    /// 顺序：解析 operation → 找 handler → 等并发许可 → 解码参数 → handler
+    /// 执行 → 编码返回值。取消与 deadline 在每一步之间各检查一次；即使 handler
+    /// 已返回结果，只要期间超时或被取消，仍返回 `deadline-exceeded` /
+    /// `cancelled`，避免调用方拿到已经过期的响应。
+    ///
+    /// 参数按 operation projection 的 `parameters` codec 解码：缺失 / 多余参数
+    /// 或 wire 形状不符返回 `invalid-request`，类型没有 descriptor 返回
+    /// `unsupported-codec`。返回值按 `return_type` 编码，`None` 时不额外约束。
     pub fn dispatch_with(
         &self,
         operation_id: &str,
@@ -172,9 +178,11 @@ impl HermesDispatcher {
         let _permit = self.limiter.acquire(&ctx)?;
         ctx.check()?;
 
-        let result = handler.execute(&ctx, projection, params);
+        let decoded = codec::decode_params(projection, params)?;
+        let result = handler.execute(&ctx, projection, &decoded);
         ctx.check()?;
-        result
+        let result = result?;
+        codec::encode_result(projection, &result)
     }
 
     /// 按 operation 名称 dispatch，不设 deadline 也不绑定取消令牌。

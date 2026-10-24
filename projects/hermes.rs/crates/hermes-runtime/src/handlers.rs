@@ -27,7 +27,8 @@ impl HermesOperationHandler for EchoHandler {
 
 /// 把 `params.a + params.b` 相加返回的测试 handler。
 ///
-/// 期望 JSON：`{"a": 3, "b": 4}` → 返回 `7`。若参数缺失或不是数值，返回
+/// `a` / `b` 的 VOS 类型是 `i64`，wire codec 声明为 JSON string，因此期望
+/// `{"a": "3", "b": "4"}` → 返回 `"7"`。若参数缺失或不是整数字符串，返回
 /// `invalid-request`。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AddHandler;
@@ -39,14 +40,16 @@ impl HermesOperationHandler for AddHandler {
         _projection: &OperationProjection,
         params: &serde_json::Value,
     ) -> RpcResult<serde_json::Value> {
-        let a = params
-            .get("a")
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| RpcError::new(RpcErrorCode::InvalidRequest, "missing or non-integer param `a`"))?;
-        let b = params
-            .get("b")
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| RpcError::new(RpcErrorCode::InvalidRequest, "missing or non-integer param `b`"))?;
-        Ok(serde_json::Value::Number(serde_json::Number::from(a + b)))
+        let a = int_param(params, "a")?;
+        let b = int_param(params, "b")?;
+        Ok(serde_json::Value::String((a + b).to_string()))
     }
+}
+
+fn int_param(params: &serde_json::Value, name: &str) -> RpcResult<i64> {
+    params
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| text.parse::<i64>().ok())
+        .ok_or_else(|| RpcError::new(RpcErrorCode::InvalidRequest, format!("missing or non-integer-string param `{name}`")))
 }
