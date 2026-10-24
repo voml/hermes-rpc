@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const entry = new URL("../src/index.ts", import.meta.url).href;
-
-const SERVICE_CONTRACT = JSON.stringify({
-    service_name: "hermes.rpc.FileService",
-    methods: [{ name: "read", request_type: "ReadRequest", response_type: "ReadResponse", docs: "" }],
-});
+const fixture = new URL(
+    "../../../platforms/hermes-unknown-wasm32/tests/fixtures/operations_services.contract.json",
+    import.meta.url,
+);
+const CONTRACT_ARTIFACT = readFileSync(fixture, "utf8");
 
 test("loadHermesWeb initializes the real wasm binding", async () => {
     const { loadHermesWeb } = await import(entry);
@@ -22,24 +23,25 @@ test("loadHermesWeb caches one initialization", async () => {
 });
 
 test("re-exported helpers delegate to the wasm binding", async () => {
-    const { loadHermesWeb, validateServiceContract, HermesRegistry, decodeDispatchRequest } = await import(entry);
+    const { loadHermesWeb, validateContractArtifact, HermesRegistry, decodeDispatchRequest } = await import(entry);
     await loadHermesWeb();
 
-    assert.deepEqual(JSON.parse(validateServiceContract(SERVICE_CONTRACT)), { ok: true });
-    assert.equal(JSON.parse(validateServiceContract('{"service_name":42}')).ok, false);
+    assert.deepEqual(JSON.parse(validateContractArtifact(CONTRACT_ARTIFACT)), { ok: true });
+    assert.equal(JSON.parse(validateContractArtifact('{"version":"vos/hermes.contract/v0"}')).ok, false);
 
     const registry = new HermesRegistry();
     try {
-        assert.deepEqual(JSON.parse(registry.registerServiceContract(SERVICE_CONTRACT)), { ok: true });
-        assert.deepEqual(JSON.parse(registry.serviceNames()), ["hermes.rpc.FileService"]);
+        assert.deepEqual(JSON.parse(registry.registerContractArtifact(CONTRACT_ARTIFACT)), { ok: true });
+        assert.deepEqual(JSON.parse(registry.serviceNames()), ["IdentityService"]);
     } finally {
         registry.free();
     }
 
-    const request = JSON.parse(decodeDispatchRequest('{"operation":"op_0123456789abcdef"}')) as {
-        operation: string;
-    };
-    assert.equal(request.operation, "op_0123456789abcdef");
+    const request = JSON.parse(
+        decodeDispatchRequest('{"service":"IdentityService","method":"create","params":{}}'),
+    ) as { service: string; method: string };
+    assert.equal(request.service, "IdentityService");
+    assert.equal(request.method, "create");
 });
 
 test("resetHermesWebForTests re-arms the initialization gate", async () => {

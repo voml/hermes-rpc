@@ -10,15 +10,15 @@ all run in Rust, so no TypeScript parser is involved.
 ## Usage
 
 ```ts
-import { loadHermesWeb, validateServiceContract, HermesRegistry } from "@yydb/hermes-language";
+import { loadHermesWeb, validateContractArtifact, HermesRegistry } from "@yydb/hermes-language";
 
 const { version } = await loadHermesWeb();
 console.log(version);
 
-const result = validateServiceContract('{"service_name":"demo.Echo","methods":[]}');
+const result = validateContractArtifact(hermesContractArtifactJson);
 
 const registry = new HermesRegistry();
-registry.registerServiceContract('{"service_name":"demo.Echo","methods":[]}');
+registry.registerContractArtifact(hermesContractArtifactJson);
 console.log(registry.serviceNames());
 registry.free();
 ```

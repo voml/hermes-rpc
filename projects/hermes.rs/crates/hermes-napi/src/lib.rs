@@ -1,17 +1,19 @@
 //! N-API binding for Hermes RPC dispatch.
 //!
-//! Exposes [`HermesDispatcher`] core methods to Node.js via `napi-rs`.
-//! Handler registration stays on the Rust side (user must build hermes-napi
-//! with their own handler impls); this layer only handles artifact loading
-//! and dispatch routing.
+//! Exposes [`hermes_runtime::HermesDispatcher`] core methods to Node.js via
+//! `napi-rs`. Handler registration stays on the Rust side (user must build
+//! hermes-napi with their own handler impls); this layer only handles contract
+//! artifact loading and `service.method` dispatch routing.
 //!
 //! Errors cross the boundary in two channels: a `NapiError` for load-time
 //! failures, and the structured `error` field of [`HermesDispatchJsResult`]
-//! for dispatch results. Both carry a stable RPC error code.
+//! for dispatch results. Both carry a stable RPC error code; upstream
+//! diagnostics (`ART010` / `ART020` / `ART021` / `OPC` / `SVC`) stay in
+//! `diagnosticCode`.
 
 use hermes_runtime::{
-    CallOptions, HermesDispatchRequest, HermesDispatchResponse, HermesDispatcher,
-    error::{RpcError, RpcErrorCode, RpcResult},
+    CallOptions, ContractArtifact, HermesDispatchRequest, HermesDispatchResponse, HermesDispatcher, RpcError, RpcErrorCode,
+    RpcResult,
 };
 use napi::{Error as NapiError, Status};
 use napi_derive::napi;
@@ -30,6 +32,8 @@ pub fn hermes_version() -> &'static str {
 pub struct HermesRpcErrorJs {
     /// Stable RPC error code (kebab-case), see `RpcErrorCode`.
     pub code: String,
+    /// Upstream artifact diagnostic code (`ART010`, `ART020`, `SVC016`, ...).
+    pub diagnostic_code: Option<String>,
     /// Human-readable detail. Clients must branch on `code`, not on this text.
     pub message: String,
 }
@@ -38,23 +42,39 @@ pub struct HermesRpcErrorJs {
 #[napi(object)]
 #[derive(Clone, Debug)]
 pub struct HermesDispatchJsResult {
-    /// Operation id that handled the dispatch.
-    pub operation_id: String,
-    /// Success result JSON string, or `None` on error.
+    /// Service that was addressed.
+    pub service: String,
+    /// Method that was addressed.
+    pub method: String,
+    /// Operation id resolved by the registry.
+    pub operation_id: Option<String>,
+    /// Method id resolved by the registry.
+    pub method_id: Option<String>,
+    /// Success result JSON string for unary methods, or `None`.
     pub result: Option<String>,
+    /// Response element JSON strings for server-stream methods, or `None`.
+    pub stream: Option<Vec<String>>,
     /// Structured error, or `None` on success.
     pub error: Option<HermesRpcErrorJs>,
 }
 
 fn rpc_error_to_js(err: &RpcError) -> HermesRpcErrorJs {
-    HermesRpcErrorJs { code: err.code().as_str().to_string(), message: err.message().to_string() }
+    HermesRpcErrorJs {
+        code: err.code().as_str().to_string(),
+        diagnostic_code: err.diagnostic_code().map(str::to_string),
+        message: err.message().to_string(),
+    }
 }
 
 fn response_to_js(resp: HermesDispatchResponse) -> HermesDispatchJsResult {
     HermesDispatchJsResult {
-        operation_id: resp.operation_id,
-        result: resp.result.map(|v| v.to_string()),
-        error: resp.error.as_ref().map(rpc_error_to_js),
+        service: resp.service().to_string(),
+        method: resp.method().to_string(),
+        operation_id: resp.operation_id().map(str::to_string),
+        method_id: resp.method_id().map(str::to_string),
+        result: resp.result().map(Value::to_string),
+        stream: resp.stream().map(|items| items.iter().map(Value::to_string).collect()),
+        error: resp.error().map(rpc_error_to_js),
     }
 }
 
@@ -78,6 +98,27 @@ fn call_options(timeout_ms: Option<u32>) -> CallOptions {
     }
 }
 
+fn decode_contract(json: &str) -> std::result::Result<ContractArtifact, NapiError> {
+    hermes_runtime::parse_contract_artifact(json).map_err(|e| {
+        NapiError::new(
+            Status::GenericFailure,
+            format!("contract artifact [{}]: {}", e.diagnostic_code().unwrap_or("unknown"), e.message()),
+        )
+    })
+}
+
+fn empty_result(service: &str, method: &str, error: HermesRpcErrorJs) -> HermesDispatchJsResult {
+    HermesDispatchJsResult {
+        service: service.to_string(),
+        method: method.to_string(),
+        operation_id: None,
+        method_id: None,
+        result: None,
+        stream: None,
+        error: Some(error),
+    }
+}
+
 /// Opaque Hermes dispatcher handle exposed to JS.
 #[napi]
 pub struct HermesDispatcherHandle {
@@ -92,16 +133,10 @@ impl HermesDispatcherHandle {
         Self { inner: HermesDispatcher::new() }
     }
 
-    /// Load a `ServiceProjectionArtifact` JSON string into the dispatcher registry.
+    /// Load a `vos/hermes.contract/v0` artifact JSON string into the registry.
     #[napi]
-    pub fn load_service_artifact(&mut self, json: String) -> std::result::Result<(), NapiError> {
-        map_rpc(self.inner.load_service_artifact(&json), "load_service_artifact")
-    }
-
-    /// Load a `OperationProjectionArtifact` JSON string into the dispatcher registry.
-    #[napi]
-    pub fn load_operation_artifact(&mut self, json: String) -> std::result::Result<(), NapiError> {
-        map_rpc(self.inner.load_operation_artifact(&json), "load_operation_artifact")
+    pub fn load_contract_artifact(&mut self, json: String) -> std::result::Result<(), NapiError> {
+        map_rpc(self.inner.load_contract_artifact(&json), "load_contract_artifact")
     }
 
     /// Set the in-flight dispatch limit. `null` or `0` means unlimited.
@@ -110,47 +145,55 @@ impl HermesDispatcherHandle {
         self.inner.set_max_concurrency(limit.map(|limit| limit as usize));
     }
 
-    /// Dispatch by operation id (`op_<hex>`) or by name.
+    /// Dispatch `service.method` with a JSON parameter object.
     ///
-    /// `params_json` must be a valid JSON object. `timeout_ms` sets the dispatch
-    /// deadline: when the handler outlives it, the structured error carries
+    /// `params_json` must decode to a JSON object matching the bound
+    /// `OperationContract.parameters`. `timeout_ms` sets the dispatch deadline:
+    /// when the handler outlives it, the structured error carries
     /// `deadline-exceeded`. Dispatch failures are encoded in the structured
     /// `error` field of [`HermesDispatchJsResult`].
     #[napi]
-    pub fn dispatch(&self, operation: String, params_json: String, timeout_ms: Option<u32>) -> HermesDispatchJsResult {
+    pub fn dispatch(
+        &self,
+        service: String,
+        method: String,
+        params_json: String,
+        timeout_ms: Option<u32>,
+    ) -> HermesDispatchJsResult {
         let params = match decode_params(&params_json) {
             Ok(params) => params,
-            Err(error) => return HermesDispatchJsResult { operation_id: String::new(), result: None, error: Some(error) },
+            Err(error) => return empty_result(&service, &method, error),
         };
-        let request = HermesDispatchRequest { operation, params };
+        let request = HermesDispatchRequest::new(service, method, params);
         response_to_js(self.inner.dispatch_request_with(&request, &call_options(timeout_ms)))
     }
 }
 
 // ---------------------------------------------------------------------------
-// Single-shot convenience: build dispatcher → load both artifacts → dispatch
+// Single-shot convenience: parse artifact → dispatch in one call
 // ---------------------------------------------------------------------------
 
-/// Load both artifacts and dispatch in one call.
+/// Parse a contract artifact and dispatch `service.method` in one call.
 ///
 /// Useful for simple "script and dispatch" flows that don't need a persistent
-/// dispatcher handle. Artifact loading errors propagate as `NapiError` with an
-/// RPC error code; dispatch results are returned in the response object.
+/// dispatcher handle. Artifact loading errors propagate as `NapiError` with the
+/// upstream diagnostic code; dispatch results are returned in the response
+/// object.
 #[napi]
 pub fn run_hermes_dispatch(
-    service_artifact_json: String,
-    operation_artifact_json: String,
-    operation: String,
+    contract_artifact_json: String,
+    service: String,
+    method: String,
     params_json: String,
     timeout_ms: Option<u32>,
 ) -> std::result::Result<HermesDispatchJsResult, NapiError> {
+    let artifact = decode_contract(&contract_artifact_json)?;
     let mut dispatcher = HermesDispatcher::new();
-    map_rpc(dispatcher.load_service_artifact(&service_artifact_json), "load_service_artifact")?;
-    map_rpc(dispatcher.load_operation_artifact(&operation_artifact_json), "load_operation_artifact")?;
+    map_rpc(dispatcher.registry_mut().register_artifact(&artifact), "register_contract_artifact")?;
     let params = match decode_params(&params_json) {
         Ok(params) => params,
-        Err(error) => return Ok(HermesDispatchJsResult { operation_id: String::new(), result: None, error: Some(error) }),
+        Err(error) => return Ok(empty_result(&service, &method, error)),
     };
-    let request = HermesDispatchRequest { operation, params };
+    let request = HermesDispatchRequest::new(service, method, params);
     Ok(response_to_js(dispatcher.dispatch_request_with(&request, &call_options(timeout_ms))))
 }

@@ -1,72 +1,56 @@
-//! Contract validation exports must reuse the runtime loaders.
+//! Envelope exports must delegate to the shared contract loader and keep the
+//! upstream diagnostic codes unchanged.
 
-use hermes_wasm::{hermes_version, validate_service_contract, validate_service_projection};
+mod common;
+
+use hermes_wasm::{hermes_contract_format, validate_contract_artifact};
 use serde_json::Value;
-
-const SERVICE_CONTRACT: &str = r#"{
-  "service_name": "hermes.rpc.FileService",
-  "methods": [
-    {
-      "name": "read",
-      "request_type": "ReadRequest",
-      "response_type": "ReadResponse",
-      "docs": "Read one file."
-    }
-  ],
-  "revision": "rev-1"
-}"#;
-
-const SERVICE_PROJECTION: &str = include_str!("fixtures/service_projection.json");
 
 fn parse(raw: &str) -> Value {
     serde_json::from_str(raw).expect("export must return JSON")
 }
 
 #[test]
-fn version_matches_crate_version() {
-    assert_eq!(hermes_version(), env!("CARGO_PKG_VERSION"));
-    assert!(!hermes_version().is_empty());
+fn exports_the_only_accepted_contract_format() {
+    assert_eq!(hermes_contract_format(), "vos/hermes.contract/v0");
 }
 
 #[test]
-fn accepts_valid_service_contract() {
-    assert_eq!(parse(&validate_service_contract(SERVICE_CONTRACT)), serde_json::json!({ "ok": true }));
+fn accepts_a_hermes_contract_artifact() {
+    let result = parse(&validate_contract_artifact(&common::hermes_contract_json()));
+    assert_eq!(result, serde_json::json!({ "ok": true }));
 }
 
 #[test]
-fn rejects_service_contract_with_wrong_field_type() {
-    let result = parse(&validate_service_contract(r#"{"service_name":42,"methods":[]}"#));
+fn rejects_an_iris_contract_artifact() {
+    let result = parse(&validate_contract_artifact(&common::iris_contract_json()));
     assert_eq!(result["ok"], false);
-    assert_eq!(result["code"], "invalid-request");
-    assert!(result["message"].as_str().is_some_and(|message| !message.is_empty()));
+    assert_eq!(result["code"], "artifact-corrupt");
+    assert_eq!(result["diagnosticCode"], "ART010");
 }
 
 #[test]
-fn rejects_truncated_service_contract() {
-    let result = parse(&validate_service_contract(r#"{"service_name":"a""#));
-    assert_eq!(result["ok"], false);
-    assert_eq!(result["code"], "invalid-request");
+fn rejects_unknown_contract_versions_and_fields() {
+    let mut value: Value = serde_json::from_str(&common::hermes_contract_json()).expect("fixture JSON");
+    value["version"] = serde_json::json!("vos/hermes.contract/v1");
+    let unknown_version = parse(&validate_contract_artifact(&value.to_string()));
+    assert_eq!(unknown_version["diagnosticCode"], "ART010");
+
+    let mut value: Value = serde_json::from_str(&common::hermes_contract_json()).expect("fixture JSON");
+    value["futureField"] = serde_json::json!(true);
+    let unknown_field = parse(&validate_contract_artifact(&value.to_string()));
+    assert_eq!(unknown_field["diagnosticCode"], "ART010");
 }
 
 #[test]
-fn accepts_valid_service_projection() {
-    assert_eq!(parse(&validate_service_projection(SERVICE_PROJECTION)), serde_json::json!({ "ok": true }));
-}
+fn rejects_fingerprint_mismatch_and_missing_producer_version() {
+    let mut value: Value = serde_json::from_str(&common::hermes_contract_json()).expect("fixture JSON");
+    value["fingerprint"] = serde_json::json!("0".repeat(64));
+    let mismatch = parse(&validate_contract_artifact(&value.to_string()));
+    assert_eq!(mismatch["diagnosticCode"], "ART020");
 
-#[test]
-fn rejects_service_projection_with_unknown_stage() {
-    let mut artifact = parse(SERVICE_PROJECTION);
-    artifact["envelope"]["stage"] = Value::String("resolved-contract".to_string());
-    let result = parse(&validate_service_projection(&artifact.to_string()));
-    assert_eq!(result["ok"], false);
-    assert_eq!(result["code"], "SRV011");
-}
-
-#[test]
-fn rejects_service_projection_with_unknown_field() {
-    let mut artifact = parse(SERVICE_PROJECTION);
-    artifact["services"][0]["unexpected"] = Value::Bool(true);
-    let result = parse(&validate_service_projection(&artifact.to_string()));
-    assert_eq!(result["ok"], false);
-    assert_eq!(result["code"], "SRV010");
+    let mut value: Value = serde_json::from_str(&common::hermes_contract_json()).expect("fixture JSON");
+    value["producer"]["version"] = serde_json::json!("");
+    let missing_producer = parse(&validate_contract_artifact(&value.to_string()));
+    assert_eq!(missing_producer["diagnosticCode"], "ART021");
 }

@@ -12,16 +12,16 @@ import {
     HermesRegistry,
     initWasm,
     hermesVersion,
-    validateServiceContract,
+    validateContractArtifact,
 } from "@yydb/hermes-unknown-wasm32";
 
 await initWasm();
 
 console.log(hermesVersion());
-console.log(validateServiceContract('{"service_name":"demo.Echo","methods":[]}'));
+console.log(validateContractArtifact(hermesContractArtifactJson));
 
 const registry = new HermesRegistry();
-registry.registerServiceContract('{"service_name":"demo.Echo","methods":[]}');
+registry.registerContractArtifact(hermesContractArtifactJson);
 console.log(registry.serviceNames());
 registry.free();
 ```
@@ -32,10 +32,14 @@ custom WASM bytes.
 
 ## Result documents
 
+Validation accepts only `vos/hermes.contract/v0`. Unknown formats, versions
+and fields, fingerprint mismatches and missing producer metadata are rejected
+with the upstream diagnostic code (`ART010` / `ART020` / `ART021`).
+
 Validation and registry mutations return JSON:
 
 - success: `{"ok":true}`
-- failure: `{"ok":false,"code":"<stable-code>","message":"<detail>"}`
+- failure: `{"ok":false,"code":"<stable-code>","diagnosticCode":"<upstream-code>","message":"<detail>"}`
 
 `decodeDispatchRequest` and `encodeDispatchResponse` return the canonical JSON
 form of the wire envelope, or the same failure document.

@@ -2,7 +2,7 @@
 /* eslint-disable */
 
 /**
- * Service registry exposed to JavaScript hosts.
+ * Contract registry exposed to JavaScript hosts.
  */
 export class HermesRegistry {
     free(): void;
@@ -16,13 +16,13 @@ export class HermesRegistry {
      */
     constructor();
     /**
-     * Register a `HermesServiceContract` JSON document.
+     * Number of registered operations.
      */
-    register_service_contract(json: string): string;
+    operation_count(): number;
     /**
-     * Register every service in an upstream `ServiceProjectionArtifact` JSON document.
+     * Register a `vos/hermes.contract/v0` artifact JSON document.
      */
-    register_service_projection(json: string): string;
+    register_contract_artifact(json: string): string;
     /**
      * Number of registered services.
      */
@@ -44,19 +44,19 @@ export function decodeDispatchRequest(json: string): string;
 export function encodeDispatchResponse(json: string): string;
 
 /**
+ * Contract format accepted by Hermes.
+ */
+export function hermesContractFormat(): string;
+
+/**
  * Hermes WASM binding version (Cargo package version).
  */
 export function hermesVersion(): string;
 
 /**
- * Validate a hand-written `HermesServiceContract` JSON document.
+ * Load and validate a `vos/hermes.contract/v0` artifact JSON document.
  */
-export function validateServiceContract(json: string): string;
-
-/**
- * Validate an upstream `vos_types::ServiceProjectionArtifact` JSON document.
- */
-export function validateServiceProjection(json: string): string;
+export function validateContractArtifact(json: string): string;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -65,15 +65,15 @@ export interface InitOutput {
     readonly __wbg_hermesregistry_free: (a: number, b: number) => void;
     readonly decodeDispatchRequest: (a: number, b: number) => [number, number];
     readonly encodeDispatchResponse: (a: number, b: number) => [number, number];
+    readonly hermesContractFormat: () => [number, number];
     readonly hermesVersion: () => [number, number];
     readonly hermesregistry_describe_method: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly hermesregistry_new: () => number;
-    readonly hermesregistry_register_service_contract: (a: number, b: number, c: number) => [number, number];
-    readonly hermesregistry_register_service_projection: (a: number, b: number, c: number) => [number, number];
+    readonly hermesregistry_operation_count: (a: number) => number;
+    readonly hermesregistry_register_contract_artifact: (a: number, b: number, c: number) => [number, number];
     readonly hermesregistry_service_count: (a: number) => number;
     readonly hermesregistry_service_names: (a: number) => [number, number];
-    readonly validateServiceContract: (a: number, b: number) => [number, number];
-    readonly validateServiceProjection: (a: number, b: number) => [number, number];
+    readonly validateContractArtifact: (a: number, b: number) => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

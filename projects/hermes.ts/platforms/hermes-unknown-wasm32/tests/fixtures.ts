@@ -1,40 +1,25 @@
-export const SERVICE_CONTRACT = JSON.stringify({
-    service_name: "hermes.rpc.FileService",
-    methods: [
-        {
-            name: "read",
-            request_type: "ReadRequest",
-            response_type: "ReadResponse",
-            docs: "Read one file.",
-        },
-    ],
-    revision: "rev-1",
-});
+import { readFileSync } from "node:fs";
 
-const SOURCE =
-    "namespace demo::auth\n\nservice IdentityService {\n  create(request: CreateRequest) -> Identity\n  delete(request: DeleteRequest) -> bool\n}\n";
+/** Hermes contract reference artifact (`vos/hermes.contract/v0`). */
+export const CONTRACT_ARTIFACT = readFileSync(
+    new URL("./fixtures/operations_services.contract.json", import.meta.url),
+    "utf8",
+);
 
-export const SERVICE_PROJECTION = JSON.stringify({
-    envelope: {
-        stage: "service-syntax-projection",
-        contractFormatVersion: "vos-service-contract-v0",
-        languageVersion: "vos-language-v0",
-        canonicalizationVersion: "vos-canonical-v0",
-        sourceUnits: [{ sourceUnitId: 0, source: SOURCE }],
-    },
-    services: [
-        {
-            name: "IdentityService",
-            canonicalPath: ["demo", "auth", "IdentityService"],
-            serviceId: "svc_3c7addc7a558968f",
-            body: {
-                text: "{\n  create(request: CreateRequest) -> Identity\n  delete(request: DeleteRequest) -> bool\n}",
-                span: { start: 46, end: 135 },
-            },
-            span: { start: 22, end: 136 },
-        },
-    ],
-});
+/** Service exposed by the reference artifact. */
+export const SERVICE_NAME = "IdentityService";
+
+/** Unary method exposed by the reference artifact. */
+export const CREATE_METHOD = "create";
+
+/** Server-stream method exposed by the reference artifact. */
+export const LOOKUP_METHOD = "lookup";
+
+/** Durable method id of the unary `create` method. */
+export const CREATE_METHOD_ID = "mtd_a1195cc42bc0418387f233d5db60833493a2aecab3923e75c97be3509f0aecfd";
+
+/** Durable operation id bound to the unary `create` method. */
+export const CREATE_OPERATION_ID = "op_38ecee3afe0deee18f4f4c89f7b33c390d84844a3bf0832632f2f612cd132437";
 
 /** Mutate a parsed JSON fixture and return its JSON string. */
 export function mutateFixture(source: string, mutate: (value: Record<string, unknown>) => void): string {

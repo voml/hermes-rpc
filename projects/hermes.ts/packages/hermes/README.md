@@ -11,20 +11,19 @@ edge and WASI hosts use `@yydb/hermes-language`, which wraps the Rust
 ```ts
 import { HermesDispatcherHandle, hermesVersion, runHermesDispatch } from "@yydb/hermes";
 
-// One-shot: load both artifacts and dispatch.
-const result = runHermesDispatch(serviceArtifactJson, operationArtifactJson, "op_0123456789abcdef", "{}");
+// One-shot: load one contract artifact and dispatch.
+const result = runHermesDispatch(contractArtifactJson, "IdentityService", "create", "{}");
 if (result.error) {
     console.error(result.error.code, result.error.message);
 } else {
     console.log(result.result);
 }
 
-// Persistent handle: load artifacts once, dispatch many times.
+// Persistent handle: load the contract once, dispatch many times.
 const dispatcher = new HermesDispatcherHandle();
-dispatcher.loadServiceArtifact(serviceArtifactJson);
-dispatcher.loadOperationArtifact(operationArtifactJson);
+dispatcher.loadContractArtifact(contractArtifactJson);
 dispatcher.setMaxConcurrency(8);
-dispatcher.dispatch("my_operation", "{}", 5000);
+dispatcher.dispatch("IdentityService", "create", "{}", 5000);
 
 console.log(hermesVersion());
 ```

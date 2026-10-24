@@ -8,9 +8,9 @@ export type InitWasmOptions = {
 
 type GlueRegistry = {
     describe_method(service: string, method: string): string;
-    register_service_contract(json: string): string;
-    register_service_projection(json: string): string;
+    register_contract_artifact(json: string): string;
     service_count(): number;
+    operation_count(): number;
     service_names(): string;
     free(): void;
 };
@@ -19,8 +19,8 @@ type GlueModule = {
     default: (input: { module_or_path: WasmInitInput | ArrayBuffer | Uint8Array }) => Promise<unknown>;
     HermesRegistry?: new () => GlueRegistry;
     hermesVersion?: () => string;
-    validateServiceContract?: (json: string) => string;
-    validateServiceProjection?: (json: string) => string;
+    hermesContractFormat?: () => string;
+    validateContractArtifact?: (json: string) => string;
     decodeDispatchRequest?: (json: string) => string;
     encodeDispatchResponse?: (json: string) => string;
 };
@@ -100,14 +100,14 @@ export function hermesVersion(): string {
     return requireExport("hermesVersion")();
 }
 
-/** Validate a `HermesServiceContract` JSON document. */
-export function validateServiceContract(json: string): string {
-    return requireExport("validateServiceContract")(json);
+/** The only contract format Hermes accepts. */
+export function hermesContractFormat(): string {
+    return requireExport("hermesContractFormat")();
 }
 
-/** Validate an upstream VOS `ServiceProjectionArtifact` JSON document. */
-export function validateServiceProjection(json: string): string {
-    return requireExport("validateServiceProjection")(json);
+/** Validate a `vos/hermes.contract/v0` artifact JSON document. */
+export function validateContractArtifact(json: string): string {
+    return requireExport("validateContractArtifact")(json);
 }
 
 /** Decode a dispatch request and return its canonical JSON form. */
@@ -129,19 +129,19 @@ export class HermesRegistry {
         this.#inner = new Registry();
     }
 
-    /** Register a `HermesServiceContract` JSON document. Returns a result JSON document. */
-    registerServiceContract(json: string): string {
-        return this.#inner.register_service_contract(json);
-    }
-
-    /** Register every service in a `ServiceProjectionArtifact` JSON document. */
-    registerServiceProjection(json: string): string {
-        return this.#inner.register_service_projection(json);
+    /** Register a `vos/hermes.contract/v0` artifact JSON document. Returns a result JSON document. */
+    registerContractArtifact(json: string): string {
+        return this.#inner.register_contract_artifact(json);
     }
 
     /** Number of registered services. */
     serviceCount(): number {
         return this.#inner.service_count();
+    }
+
+    /** Number of registered operations. */
+    operationCount(): number {
+        return this.#inner.operation_count();
     }
 
     /** Registered service names as a JSON array string. */

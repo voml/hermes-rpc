@@ -25,35 +25,50 @@ export const HERMES_PLATFORM_PACKAGES = {
 export type HermesRpcError = {
     /** Stable RPC error code (kebab-case), see the Rust `RpcErrorCode`. */
     code: string;
+    /** Upstream artifact diagnostic code (`ART010`, `ART020`, `SVC013`, ...) when present. */
+    diagnosticCode?: string | null;
     /** Human-readable detail. Branch on `code`, not on this text. */
     message: string;
 };
 
-/** Result of one dispatch. `result` and `error` are mutually exclusive. */
+/**
+ * Result of one dispatch.
+ *
+ * `result` (unary), `stream` (server-stream) and `error` are mutually
+ * exclusive. JSON values are stringified so the JS facade does not introduce a
+ * second wire codec.
+ */
 export type HermesDispatchResult = {
-    /** Operation id that handled the dispatch. */
-    operationId: string;
-    /** Success result JSON, or `null` on error. */
+    /** Service that was addressed. */
+    service: string;
+    /** Method that was addressed. */
+    method: string;
+    /** Durable operation id resolved by the registry, or `null` when routing failed. */
+    operationId: string | null;
+    /** Durable method id resolved by the registry, or `null` when routing failed. */
+    methodId: string | null;
+    /** Unary result JSON, or `null`. */
     result: string | null;
+    /** Server-stream element JSON strings, or `null`. */
+    stream: string[] | null;
     /** Structured error, or `null` on success. */
     error: HermesRpcError | null;
 };
 
 /** Native dispatcher handle exposed by `@yydb/hermes-<platform>`. */
 export type HermesNativeDispatcherHandle = {
-    loadServiceArtifact(json: string): void;
-    loadOperationArtifact(json: string): void;
+    loadContractArtifact(json: string): void;
     setMaxConcurrency(limit?: number | null): void;
-    dispatch(operation: string, paramsJson: string, timeoutMs?: number | null): HermesDispatchResult;
+    dispatch(service: string, method: string, paramsJson: string, timeoutMs?: number | null): HermesDispatchResult;
 };
 
 /** Native binding surface shared by every `@yydb/hermes-<platform>` package. */
 export type HermesNativeBindings = {
     hermesVersion(): string;
     runHermesDispatch(
-        serviceArtifactJson: string,
-        operationArtifactJson: string,
-        operation: string,
+        contractArtifactJson: string,
+        service: string,
+        method: string,
         paramsJson: string,
         timeoutMs?: number | null,
     ): HermesDispatchResult;
@@ -122,15 +137,15 @@ export function hermesVersion(): string {
     return loadHermesNative().hermesVersion();
 }
 
-/** Load both artifacts and dispatch in one call. */
+/** Load one Hermes contract artifact and dispatch `service.method` in one call. */
 export function runHermesDispatch(
-    serviceArtifactJson: string,
-    operationArtifactJson: string,
-    operation: string,
+    contractArtifactJson: string,
+    service: string,
+    method: string,
     paramsJson: string,
     timeoutMs?: number | null,
 ): HermesDispatchResult {
-    return loadHermesNative().runHermesDispatch(serviceArtifactJson, operationArtifactJson, operation, paramsJson, timeoutMs);
+    return loadHermesNative().runHermesDispatch(contractArtifactJson, service, method, paramsJson, timeoutMs);
 }
 
 /** Persistent dispatcher handle backed by the native binding. */
@@ -142,14 +157,9 @@ export class HermesDispatcherHandle {
         this.#inner = new NativeHandle();
     }
 
-    /** Load a `ServiceProjectionArtifact` JSON document. */
-    loadServiceArtifact(json: string): void {
-        this.#inner.loadServiceArtifact(json);
-    }
-
-    /** Load an `OperationProjectionArtifact` JSON document. */
-    loadOperationArtifact(json: string): void {
-        this.#inner.loadOperationArtifact(json);
+    /** Load a `vos/hermes.contract/v0` artifact JSON document. */
+    loadContractArtifact(json: string): void {
+        this.#inner.loadContractArtifact(json);
     }
 
     /** Set the in-flight dispatch limit. `null` or `0` means unlimited. */
@@ -157,8 +167,8 @@ export class HermesDispatcherHandle {
         this.#inner.setMaxConcurrency(limit);
     }
 
-    /** Dispatch by operation id (`op_<hex>`) or by operation name. */
-    dispatch(operation: string, paramsJson: string, timeoutMs?: number | null): HermesDispatchResult {
-        return this.#inner.dispatch(operation, paramsJson, timeoutMs);
+    /** Dispatch by `service` name + `method` name. */
+    dispatch(service: string, method: string, paramsJson: string, timeoutMs?: number | null): HermesDispatchResult {
+        return this.#inner.dispatch(service, method, paramsJson, timeoutMs);
     }
 }

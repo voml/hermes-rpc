@@ -5,18 +5,31 @@
 //! TypeScript host free of a parallel artifact or wire parser.
 //!
 //! Errors cross the boundary as structured JSON:
-//! `{"ok": false, "code": "<stable-code>", "message": "<detail>"}`.
+//! `{"ok": false, "code": "<stable-code>", "diagnosticCode"?: "<upstream-code>",
+//! "message": "<detail>"}`.
 
 #![deny(missing_docs)]
 
 use hermes_runtime::{
-    BTreeServiceRegistry, HermesDispatchRequest, HermesDispatchResponse, HermesServiceContract,
-    HermesServiceLoader, HermesServiceRegistry, JsonServiceLoader,
+    ContractArtifact, ContractRegistry, HERMES_CONTRACT_FORMAT, HermesContractLoader, HermesDispatchRequest,
+    HermesDispatchResponse, JsonContractLoader, MethodRoute, RpcError,
 };
 use wasm_bindgen::prelude::*;
 
 fn ok_json() -> String {
     r#"{"ok":true}"#.to_string()
+}
+
+fn failure_from(error: &RpcError) -> String {
+    let mut value = serde_json::json!({
+        "ok": false,
+        "code": error.code().as_str(),
+        "message": error.message(),
+    });
+    if let Some(diagnostic_code) = error.diagnostic_code() {
+        value["diagnosticCode"] = serde_json::Value::String(diagnostic_code.to_string());
+    }
+    value.to_string()
 }
 
 fn failure_json(code: &str, message: impl Into<String>) -> String {
@@ -36,27 +49,40 @@ fn reject_unknown_keys(json: &str, allowed: &[&str]) -> Result<(), String> {
     }
 }
 
+fn route_json(route: &MethodRoute<'_>) -> String {
+    serde_json::json!({
+        "service": route.service.name,
+        "method": route.method.name,
+        "methodId": route.method.method_id,
+        "operationId": route.operation.operation_id,
+        "requestType": route.method.request_type,
+        "responseType": route.method.response_type,
+        "stream": route.method.stream,
+        "effect": route.operation.effect,
+        "capabilities": route.operation.capabilities,
+        "parameters": route.operation.parameters,
+    })
+    .to_string()
+}
+
 /// Hermes WASM binding version (Cargo package version).
 #[wasm_bindgen(js_name = hermesVersion)]
 pub fn hermes_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Validate a hand-written `HermesServiceContract` JSON document.
-#[wasm_bindgen(js_name = validateServiceContract)]
-pub fn validate_service_contract(json: &str) -> String {
-    match JsonServiceLoader.load(json.as_bytes()) {
-        Ok(_) => ok_json(),
-        Err(err) => failure_json(err.code().as_str(), err.message()),
-    }
+/// Contract format accepted by Hermes.
+#[wasm_bindgen(js_name = hermesContractFormat)]
+pub fn hermes_contract_format() -> String {
+    HERMES_CONTRACT_FORMAT.to_string()
 }
 
-/// Validate an upstream `vos_types::ServiceProjectionArtifact` JSON document.
-#[wasm_bindgen(js_name = validateServiceProjection)]
-pub fn validate_service_projection(json: &str) -> String {
-    match vos_types::ServiceProjectionArtifact::from_json(json) {
+/// Load and validate a `vos/hermes.contract/v0` artifact JSON document.
+#[wasm_bindgen(js_name = validateContractArtifact)]
+pub fn validate_contract_artifact(json: &str) -> String {
+    match JsonContractLoader.load_contract(json.as_bytes()) {
         Ok(_) => ok_json(),
-        Err(err) => failure_json(&err.code, err.message),
+        Err(err) => failure_from(&err),
     }
 }
 
@@ -67,8 +93,8 @@ pub fn decode_dispatch_request(json: &str) -> String {
         Ok(request) => request,
         Err(err) => return failure_json("invalid-request", err.to_string()),
     };
-    if request.operation.trim().is_empty() {
-        return failure_json("invalid-request", "dispatch request `operation` must not be empty");
+    if let Err(err) = request.validate() {
+        return failure_from(&err);
     }
     encode_json(&request)
 }
@@ -76,27 +102,38 @@ pub fn decode_dispatch_request(json: &str) -> String {
 /// Decode a `HermesDispatchResponse` and return its canonical JSON form.
 #[wasm_bindgen(js_name = encodeDispatchResponse)]
 pub fn encode_dispatch_response(json: &str) -> String {
-    if let Err(message) = reject_unknown_keys(json, &["operationId", "result", "error"]) {
+    let allowed = ["service", "method", "operationId", "methodId", "result", "stream", "error"];
+    if let Err(message) = reject_unknown_keys(json, &allowed) {
         return failure_json("invalid-request", message);
     }
     let response: HermesDispatchResponse = match serde_json::from_str(json) {
         Ok(response) => response,
         Err(err) => return failure_json("invalid-request", err.to_string()),
     };
-    if response.result.is_some() == response.error.is_some() {
-        return failure_json("invalid-request", "dispatch response must carry exactly one of `result` or `error`");
+    if response.service().trim().is_empty() || response.method().trim().is_empty() {
+        return failure_json("invalid-request", "dispatch response must name its `service` and `method`");
     }
-    if response.operation_id.trim().is_empty() {
-        return failure_json("invalid-request", "dispatch response `operationId` must not be empty");
+    if response.payload_count() != 1 {
+        return failure_json("invalid-request", "dispatch response must carry exactly one of `result`, `stream` or `error`");
+    }
+    if let Some(operation_id) = response.operation_id() {
+        if operation_id.trim().is_empty() {
+            return failure_json("invalid-request", "dispatch response `operationId` must not be empty");
+        }
+    }
+    if let Some(method_id) = response.method_id() {
+        if method_id.trim().is_empty() {
+            return failure_json("invalid-request", "dispatch response `methodId` must not be empty");
+        }
     }
     encode_json(&response)
 }
 
-/// Service registry exposed to JavaScript hosts.
+/// Contract registry exposed to JavaScript hosts.
 #[wasm_bindgen]
 #[derive(Default)]
 pub struct HermesRegistry {
-    inner: BTreeServiceRegistry,
+    inner: ContractRegistry,
 }
 
 #[wasm_bindgen]
@@ -107,49 +144,38 @@ impl HermesRegistry {
         Self::default()
     }
 
-    /// Register a `HermesServiceContract` JSON document.
-    pub fn register_service_contract(&mut self, json: &str) -> String {
-        let contract: HermesServiceContract = match JsonServiceLoader.load(json.as_bytes()) {
+    /// Register a `vos/hermes.contract/v0` artifact JSON document.
+    pub fn register_contract_artifact(&mut self, json: &str) -> String {
+        let contract: ContractArtifact = match JsonContractLoader.load_contract(json.as_bytes()) {
             Ok(contract) => contract,
-            Err(err) => return failure_json(err.code().as_str(), err.message()),
+            Err(err) => return failure_from(&err),
         };
-        match self.inner.register(contract) {
+        match self.inner.register_artifact(&contract) {
             Ok(()) => ok_json(),
-            Err(err) => failure_json(err.code().as_str(), err.message()),
-        }
-    }
-
-    /// Register every service in an upstream `ServiceProjectionArtifact` JSON document.
-    pub fn register_service_projection(&mut self, json: &str) -> String {
-        let artifact = match vos_types::ServiceProjectionArtifact::from_json(json) {
-            Ok(artifact) => artifact,
-            Err(err) => return failure_json(&err.code, err.message),
-        };
-        match self.inner.register_artifact(&artifact) {
-            Ok(()) => ok_json(),
-            Err(err) => failure_json(err.code().as_str(), err.message()),
+            Err(err) => failure_from(&err),
         }
     }
 
     /// Number of registered services.
     pub fn service_count(&self) -> u32 {
-        self.inner.all().len() as u32
+        self.inner.service_count() as u32
+    }
+
+    /// Number of registered operations.
+    pub fn operation_count(&self) -> u32 {
+        self.inner.operation_count() as u32
     }
 
     /// Registered service names as a JSON array.
     pub fn service_names(&self) -> String {
-        let names: Vec<&str> = self.inner.all().iter().map(|contract| contract.service_name.as_str()).collect();
-        encode_json(&names)
+        encode_json(&self.inner.service_names())
     }
 
     /// Describe one registered method, or return an error JSON document.
     pub fn describe_method(&self, service: &str, method: &str) -> String {
-        if self.inner.find(service).is_none() {
-            return failure_json("invalid-request", format!("service not found: {service}"));
-        }
-        match self.inner.method(service, method) {
-            Some(descriptor) => encode_json(descriptor),
-            None => failure_json("invalid-request", format!("method not found: {service}.{method}")),
+        match self.inner.resolve(service, method) {
+            Ok(route) => route_json(&route),
+            Err(err) => failure_from(&err),
         }
     }
 }
