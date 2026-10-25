@@ -508,6 +508,66 @@ fn registry_rejects_non_hermes_artifacts() {
     assert_eq!(err.diagnostic_code(), Some("ART010"));
 }
 
+#[test]
+fn registry_rejects_stale_fingerprint_at_mount_time_and_stays_empty() {
+    let mut artifact = hermes_artifact();
+    artifact.fingerprint = "0".repeat(64);
+
+    let mut registry = ContractRegistry::new();
+    let err = registry.register_artifact(&artifact).expect_err("stale fingerprint must fail at mount time");
+    assert_eq!(err.code(), RpcErrorCode::ArtifactCorrupt);
+    assert_eq!(err.diagnostic_code(), Some("ART020"));
+    assert_eq!(registry.service_count(), 0, "a rejected artifact must not leave a partial registry");
+    assert_eq!(registry.operation_count(), 0, "a rejected artifact must not leave a partial registry");
+}
+
+#[test]
+fn registry_rejects_identity_that_disagrees_with_its_canonical_path_at_mount_time() {
+    let mut artifact = hermes_artifact();
+    artifact.payload.services[0].service_id =
+        ServiceId::parse(&format!("svc_{}", "0".repeat(64))).expect("well-formed but mismatched service id");
+    // 重新 seal 让 fingerprint 与损坏后的 payload 一致，专门验证 payload 本身
+    // 也会在挂载期被上游校验拒绝，而不是只靠 fingerprint 挡住。
+    let artifact = ContractArtifact::seal(ContractFormat::Hermes, artifact.producer, artifact.payload);
+
+    let mut registry = ContractRegistry::new();
+    let err = registry.register_artifact(&artifact).expect_err("corrupt payload must fail at mount time");
+    assert_eq!(err.code(), RpcErrorCode::ArtifactCorrupt);
+    assert_eq!(err.diagnostic_code(), Some("SVC013"));
+    assert_eq!(registry.service_count(), 0, "a rejected artifact must not leave a partial registry");
+    assert_eq!(registry.operation_count(), 0, "a rejected artifact must not leave a partial registry");
+}
+
+#[test]
+fn registry_rejects_a_second_artifact_reusing_a_service_route_at_mount_time() {
+    fn mountable(path: &[&str], operation_name: &str) -> ContractArtifact {
+        let op = operation(path, operation_name, vec![], Some(scalar(CanonicalScalar::Utf8)));
+        let owner = service_id(path);
+        let svc = service(
+            path,
+            vec![method(
+                &owner,
+                "go",
+                scalar(CanonicalScalar::Utf8),
+                scalar(CanonicalScalar::Utf8),
+                MethodStreamMode::Unary,
+                &op.operation_id,
+            )],
+        );
+        artifact(vec![op], vec![svc])
+    }
+
+    let mut registry = ContractRegistry::new();
+    registry.register_artifact(&mountable(&["a", "Echo"], "go")).expect("first mount succeeds");
+
+    let err = registry
+        .register_artifact(&mountable(&["b", "Echo"], "go"))
+        .expect_err("the same service route must not be mounted twice");
+    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
+    assert!(err.message().contains("service name `Echo`"));
+    assert_eq!(registry.service_count(), 1, "the rejected mount must not change the registry");
+}
+
 fn service_id(path: &[&str]) -> ServiceId {
     let path = path.iter().map(|segment| segment.to_string()).collect::<Vec<_>>();
     ServiceId::derive(&ServiceIdentityKey::new(path).expect("service identity key"))
@@ -643,6 +703,53 @@ fn dispatch_rejects_generic_types_without_a_wire_codec() {
 }
 
 #[test]
+fn unsupported_codec_nested_inside_list_or_optional_is_not_downgraded() {
+    let boxed = ResolvedCanonicalType::Generic {
+        path: vec!["Box".to_string()],
+        arguments: vec![hermes_runtime::ResolvedCanonicalTypeArgument::Type(scalar(CanonicalScalar::Utf8))],
+    };
+    let nested = ResolvedCanonicalType::List(Box::new(ResolvedCanonicalType::Optional(Box::new(boxed))));
+    let op = operation(&["a"], "reject_nested", vec![("values", nested.clone())], Some(scalar(CanonicalScalar::Utf8)));
+    let owner = service_id(&["a", "RejectNested"]);
+    let svc = service(
+        &["a", "RejectNested"],
+        vec![method(&owner, "rejectNested", nested, scalar(CanonicalScalar::Utf8), MethodStreamMode::Unary, &op.operation_id)],
+    );
+
+    let mut registry = ContractRegistry::new();
+    registry.register_artifact(&artifact(vec![op.clone()], vec![svc])).expect("contract registers");
+    let mut dispatcher = HermesDispatcher::with_registry(registry);
+    dispatcher.register_handler(op.operation_id.as_str(), Box::new(EchoHandler)).expect("handler");
+
+    let err =
+        dispatcher.dispatch("RejectNested", "rejectNested", &json!({ "values": ["x"] })).expect_err("nested generic rejected");
+    assert_eq!(err.code(), RpcErrorCode::UnsupportedCodec, "unknown codecs must never degrade to `unknown`");
+    assert!(err.message().contains("unsupported codec for type `Box<utf8>`"));
+}
+
+#[test]
+fn unsupported_return_codec_surfaces_as_unsupported_codec_not_handler_failed() {
+    let boxed = ResolvedCanonicalType::Generic {
+        path: vec!["Box".to_string()],
+        arguments: vec![hermes_runtime::ResolvedCanonicalTypeArgument::Type(scalar(CanonicalScalar::Utf8))],
+    };
+    let op = operation(&["a"], "reject_return", vec![], Some(boxed.clone()));
+    let owner = service_id(&["a", "RejectReturn"]);
+    let svc = service(
+        &["a", "RejectReturn"],
+        vec![method(&owner, "rejectReturn", scalar(CanonicalScalar::Utf8), boxed, MethodStreamMode::Unary, &op.operation_id)],
+    );
+
+    let mut registry = ContractRegistry::new();
+    registry.register_artifact(&artifact(vec![op.clone()], vec![svc])).expect("contract registers");
+    let mut dispatcher = HermesDispatcher::with_registry(registry);
+    dispatcher.register_handler(op.operation_id.as_str(), Box::new(EchoHandler)).expect("handler");
+
+    let err = dispatcher.dispatch("RejectReturn", "rejectReturn", &json!({})).expect_err("unmapped return type rejected");
+    assert_eq!(err.code(), RpcErrorCode::UnsupportedCodec, "the declared return type, not the value shape, is unsupported");
+}
+
+#[test]
 fn scalar_codec_table_covers_all_nineteen_typed_variants() {
     let mapped = CanonicalScalar::ALL
         .into_iter()
@@ -769,6 +876,40 @@ fn concurrency_limit_queues_until_the_permit_is_released() {
 
     let options = CallOptions::with_timeout(Duration::from_millis(500));
     dispatcher.dispatch_with("IdentityService", "create", &create_params(), &options).expect("permit released");
+}
+
+#[test]
+fn cancellation_while_waiting_for_a_permit_returns_cancelled() {
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (started, started_rx) = mpsc::channel();
+
+    let mut dispatcher = lifecycle_dispatcher(Box::new(HoldHandler { started, gate: gate.clone() }));
+    dispatcher.set_max_concurrency(Some(1));
+
+    let dispatcher = Arc::new(dispatcher);
+    let background = {
+        let dispatcher = Arc::clone(&dispatcher);
+        thread::spawn(move || dispatcher.dispatch("IdentityService", "create", &create_params()))
+    };
+    started_rx.recv_timeout(Duration::from_secs(5)).expect("handler started");
+
+    let token = CancelToken::new();
+    let canceller = token.clone();
+    let cancel_thread = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(30));
+        canceller.cancel();
+    });
+
+    let options = CallOptions::new().and_timeout(Duration::from_secs(5)).and_cancellation(token);
+    let err = dispatcher
+        .dispatch_with("IdentityService", "create", &create_params(), &options)
+        .expect_err("queued call must observe cancellation, not wait for the permit");
+    assert_eq!(err.code(), RpcErrorCode::Cancelled, "waiting for a permit must stay cancellable");
+
+    cancel_thread.join().expect("cancel thread joins");
+    release_gate(&gate);
+    let held = background.join().expect("background joins").expect("held dispatch succeeds");
+    assert!(matches!(held, DispatchReply::Unary(_)));
 }
 
 // ---------------------------------------------------------------------------

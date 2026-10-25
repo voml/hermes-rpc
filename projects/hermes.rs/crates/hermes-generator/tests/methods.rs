@@ -5,6 +5,7 @@
 //! 全部落在 `hermes/service/` 子目录，不允许占用 operation 级的任何路径。
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -212,6 +213,22 @@ fn routes_table_resolves_known_methods_and_rejects_unknown_ones() {
     assert!(server.contains("  identityService: IdentityServiceHandlers;"));
     assert!(server.contains("route: requireRoute(\"IdentityService\", \"lookup\"),"));
     assert!(server.contains("export function assertOperationBindings("));
+}
+
+#[test]
+fn host_route_keys_are_unique_mount_keys_covering_every_method() {
+    let plan = generate_service(&fixture_artifact(), AotTarget::Desktop).expect("generation succeeds");
+    let routes = contents_of(&plan, "hermes/service/routes.ts");
+
+    let keys = routes
+        .lines()
+        .filter_map(|line| line.strip_prefix("  \""))
+        .filter_map(|line| line.strip_suffix("\": {"))
+        .collect::<Vec<_>>();
+    assert_eq!(keys.len(), 2, "the fixture declares two methods, got {keys:?}");
+    assert_eq!(keys.iter().collect::<BTreeSet<_>>().len(), keys.len(), "host route keys must not collide");
+    assert!(keys.contains(&format!("{SERVICE_ID}/create").as_str()));
+    assert!(keys.contains(&format!("{SERVICE_ID}/lookup").as_str()));
 }
 
 #[test]

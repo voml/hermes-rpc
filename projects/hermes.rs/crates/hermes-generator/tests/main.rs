@@ -289,6 +289,52 @@ fn method_and_operation_plans_share_a_root_without_overwriting_templates() {
 }
 
 #[test]
+fn plans_write_under_a_path_with_spaces_and_cjk_characters() {
+    let base = temp_root("cjk path");
+    let root = base.join("项目 目录").join("契约 生成");
+
+    let operations = generate(&parsed_artifact()).expect("operation generation succeeds");
+    let contract: ContractArtifact = serde_json::from_str(METHOD_FIXTURE).expect("contract fixture decodes");
+    let contract = ContractArtifact::seal(ContractFormat::Hermes, contract.producer, contract.payload);
+    let methods = generate_service(&contract, AotTarget::Desktop).expect("method generation succeeds");
+
+    let operation_write = operations.write_to(&root).expect("operation write under a spaced CJK path");
+    let method_write = methods.write_to(&root).expect("method write under a spaced CJK path");
+    assert_eq!(operation_write.written().len(), 3);
+    assert_eq!(method_write.written().len(), 6);
+
+    for path in [
+        "hermes/operations.ts",
+        "hermes/server.ts",
+        "hermes/handlers.ts",
+        "hermes/service/service.ts",
+        "hermes/service/client.ts",
+        "hermes/service/routes.ts",
+        "hermes/service/server.ts",
+        "hermes/service/metadata.ts",
+        "hermes/service/handlers.ts",
+    ] {
+        assert!(root.join(path).is_file(), "missing {path} under {}", root.display());
+    }
+    let service = fs::read_to_string(root.join("hermes/service/service.ts")).expect("method service readable");
+    assert!(service.contains("identityService"));
+    let operations_module = fs::read_to_string(root.join("hermes/operations.ts")).expect("operations readable");
+    assert!(operations_module.contains("createHermesClient"));
+
+    let operation_template = root.join("hermes/handlers.ts");
+    let method_template = root.join("hermes/service/handlers.ts");
+    fs::write(&operation_template, "// operation handlers\n").expect("write operation handlers");
+    fs::write(&method_template, "// method handlers\n").expect("write method handlers");
+
+    assert_eq!(operations.write_to(&root).expect("second operation write").skipped(), &["hermes/handlers.ts".to_string()]);
+    assert_eq!(methods.write_to(&root).expect("second method write").skipped(), &["hermes/service/handlers.ts".to_string()]);
+    assert_eq!(fs::read_to_string(&operation_template).expect("operation handlers readable"), "// operation handlers\n");
+    assert_eq!(fs::read_to_string(&method_template).expect("method handlers readable"), "// method handlers\n");
+
+    fs::remove_dir_all(&base).expect("cleanup temp root");
+}
+
+#[test]
 fn generated_file_is_rewritten_when_content_changes() {
     let root = temp_root("rewrite");
     let plan = generate(&parsed_artifact()).expect("generation succeeds");

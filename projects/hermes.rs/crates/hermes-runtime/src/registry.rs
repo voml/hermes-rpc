@@ -62,8 +62,10 @@ impl ContractRegistry {
 
     /// 注册一份 Hermes 合同 artifact。
     ///
-    /// 拒绝非 Hermes 格式、重复 service 名、重复 service / method / operation id，
-    /// 以及绑定了 payload 中不存在 operation 的 method。
+    /// 拒绝非 Hermes 格式、重复 service 名、重复 service / method / operation id、
+    /// 绑定了 payload 中不存在 operation 的 method，以及尚未通过上游校验的
+    /// artifact（陈旧 fingerprint、identity 与 canonical path 不一致、payload
+    /// 内部重复）。所有检查都在写入前完成，损坏 artifact 不会半套进入 registry。
     pub fn register_artifact(&mut self, artifact: &ContractArtifact) -> RpcResult<()> {
         if artifact.version != ContractFormat::Hermes {
             return Err(RpcError::new(
@@ -127,6 +129,10 @@ impl ContractRegistry {
             }
             incoming_services.insert(service.service_id.clone(), service.clone());
         }
+
+        // 上游校验放在最后、写入之前：陈旧的 payload fingerprint 与 identity
+        // 不一致的 artifact 必须在挂载期失败，而不是等到 dispatch 才暴露。
+        artifact.validate()?;
 
         self.operations.extend(incoming_operations);
         self.service_names.extend(incoming_names);
