@@ -1,5 +1,8 @@
 //! 合同 fixture 构造，供 `tests/` 下各测试文件共用。
 
+// 每个测试 target 只使用其中一部分 helper，未用到的 helper 不算 dead code。
+#![allow(dead_code)]
+
 use hermes_runtime::{
     CanonicalScalar, ContractArtifact, ContractFormat, ContractPayload, ContractProducer, MethodId, MethodIdentityKey,
     MethodStreamMode, OperationContract, OperationEffect, OperationId, OperationIdentityKey, OperationKind,
@@ -47,6 +50,7 @@ pub fn service(operation: &OperationContract) -> ServiceContract {
         service_id,
         name: SERVICE_NAME.to_string(),
         canonical_path,
+        attributes: Vec::new(),
         methods: vec![ServiceMethodContract {
             method_id: MethodId::derive(&method_identity),
             name: METHOD_NAME.to_string(),
@@ -54,6 +58,7 @@ pub fn service(operation: &OperationContract) -> ServiceContract {
             response_type: utf8(),
             stream: MethodStreamMode::Unary,
             operation_id: operation.operation_id.clone(),
+            attributes: Vec::new(),
         }],
         source_unit_id: 0,
         span: (0..32usize).into(),

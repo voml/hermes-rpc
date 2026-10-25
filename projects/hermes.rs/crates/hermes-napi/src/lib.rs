@@ -125,6 +125,12 @@ pub struct HermesDispatcherHandle {
     inner: HermesDispatcher,
 }
 
+impl Default for HermesDispatcherHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[napi]
 impl HermesDispatcherHandle {
     /// Create a new empty dispatcher.

@@ -116,15 +116,15 @@ pub fn encode_dispatch_response(json: &str) -> String {
     if response.payload_count() != 1 {
         return failure_json("invalid-request", "dispatch response must carry exactly one of `result`, `stream` or `error`");
     }
-    if let Some(operation_id) = response.operation_id() {
-        if operation_id.trim().is_empty() {
-            return failure_json("invalid-request", "dispatch response `operationId` must not be empty");
-        }
+    if let Some(operation_id) = response.operation_id()
+        && operation_id.trim().is_empty()
+    {
+        return failure_json("invalid-request", "dispatch response `operationId` must not be empty");
     }
-    if let Some(method_id) = response.method_id() {
-        if method_id.trim().is_empty() {
-            return failure_json("invalid-request", "dispatch response `methodId` must not be empty");
-        }
+    if let Some(method_id) = response.method_id()
+        && method_id.trim().is_empty()
+    {
+        return failure_json("invalid-request", "dispatch response `methodId` must not be empty");
     }
     encode_json(&response)
 }
