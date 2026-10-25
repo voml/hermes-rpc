@@ -118,6 +118,7 @@ fn method(
         response_type,
         stream,
         operation_id: operation_id.clone(),
+        attributes: Vec::new(),
     }
 }
 
@@ -128,6 +129,7 @@ fn service(path: &[&str], methods: Vec<ServiceMethodContract>) -> ServiceContrac
         service_id: ServiceId::derive(&ServiceIdentityKey::new(canonical_path.clone()).expect("service key")),
         name,
         canonical_path,
+        attributes: Vec::new(),
         methods,
         source_unit_id: 0,
         span: (0..0usize).into(),
