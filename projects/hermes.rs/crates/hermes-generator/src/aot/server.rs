@@ -1,19 +1,14 @@
-//! `server.ts` 与一次性 `handlers.ts` 渲染。
+//! `hermes/service/server.ts` 与一次性 `hermes/service/handlers.ts` 渲染。
 //!
 //! server 侧只把 method identity 绑定到用户 handler，不复制 dispatcher，也不
 //! import 任何 runtime。`bindService` 通过 `requireRoute` 拒绝未知 method，并保留
 //! operation binding 供宿主做运行期校验。
 
 use crate::{
-    aot::{AotTarget, Bindings, handler_result},
+    aot::{AotTarget, Bindings, handler_result, output_path},
     naming::string_literal,
     plan::{FileOwnership, GeneratedFile},
 };
-
-/// server 绑定模块路径。
-pub(crate) const SERVER_PATH: &str = "hermes/server.ts";
-/// 一次性业务模板路径。
-pub(crate) const TEMPLATE_PATH: &str = "hermes/handlers.ts";
 
 /// 渲染 server 绑定模块。
 pub(crate) fn render(bindings: &Bindings, target: AotTarget) -> GeneratedFile {
@@ -100,7 +95,7 @@ pub(crate) fn render(bindings: &Bindings, target: AotTarget) -> GeneratedFile {
          }\n",
     );
 
-    GeneratedFile::new(SERVER_PATH, out, FileOwnership::Generated)
+    GeneratedFile::new(output_path("server.ts"), out, FileOwnership::Generated)
 }
 
 /// 渲染一次性业务模板。
@@ -112,7 +107,7 @@ pub(crate) fn render_template(bindings: &Bindings) -> GeneratedFile {
 
     if bindings.services.is_empty() {
         out.push_str("export const handlers: ServiceHandlers = {};\n");
-        return GeneratedFile::new(TEMPLATE_PATH, out, FileOwnership::Template);
+        return GeneratedFile::new(output_path("handlers.ts"), out, FileOwnership::Template);
     }
 
     out.push_str("export const handlers: ServiceHandlers = {\n");
@@ -129,5 +124,5 @@ pub(crate) fn render_template(bindings: &Bindings) -> GeneratedFile {
     }
     out.push_str("};\n");
 
-    GeneratedFile::new(TEMPLATE_PATH, out, FileOwnership::Template)
+    GeneratedFile::new(output_path("handlers.ts"), out, FileOwnership::Template)
 }

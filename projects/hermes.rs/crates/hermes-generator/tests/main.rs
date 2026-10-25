@@ -4,19 +4,21 @@
 //! `operationId` 是 64 hex 的 durable id，二者都由上游规则派生，测试不手拼。
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use hermes_generator::{FileOwnership, GeneratorError, generate, generate_from_json};
+use hermes_generator::{AotTarget, FileOwnership, GeneratorError, generate, generate_from_json, generate_service};
 use vos_types::{
-    CANONICALIZATION_VERSION, CanonicalType, ContractEnvelope, LANGUAGE_VERSION, OPERATION_CONTRACT_FORMAT_VERSION,
-    OPERATION_PROJECTION_STAGE, OperationIdentityKey, OperationKind, OperationParameter, OperationParameterKey,
-    OperationProjection, OperationProjectionArtifact, SourceUnit, canonical_type_key,
+    CANONICALIZATION_VERSION, CanonicalType, ContractArtifact, ContractEnvelope, ContractFormat, LANGUAGE_VERSION,
+    OPERATION_CONTRACT_FORMAT_VERSION, OPERATION_PROJECTION_STAGE, OperationIdentityKey, OperationKind, OperationParameter,
+    OperationParameterKey, OperationProjection, OperationProjectionArtifact, SourceUnit, canonical_type_key,
 };
 
 const SOURCE: &str = "query Find(a: int, b: utf8): bool\nudf Ping(): utf8\nmicro Reset()";
+const METHOD_FIXTURE: &str = include_str!("fixtures/identity_service.contract.json");
 
 fn span_of(needle: &str) -> std::ops::Range<usize> {
     let start = SOURCE.find(needle).unwrap_or_else(|| panic!("source contains {needle}"));
@@ -240,6 +242,48 @@ fn write_to_creates_files_and_preserves_existing_template() {
     assert_eq!(second.unchanged(), &["hermes/operations.ts".to_string(), "hermes/server.ts".to_string()]);
     assert_eq!(second.skipped(), &["hermes/handlers.ts".to_string()]);
     assert_eq!(fs::read_to_string(&template_path).expect("template readable"), "// user implementation\n");
+
+    fs::remove_dir_all(&root).expect("cleanup temp root");
+}
+
+#[test]
+fn method_and_operation_plans_share_a_root_without_overwriting_templates() {
+    let operations = generate(&parsed_artifact()).expect("operation generation succeeds");
+    let contract: ContractArtifact = serde_json::from_str(METHOD_FIXTURE).expect("contract fixture decodes");
+    let contract = ContractArtifact::seal(ContractFormat::Hermes, contract.producer, contract.payload);
+    let methods = generate_service(&contract, AotTarget::Desktop).expect("method generation succeeds");
+
+    let operation_paths = operations.files().iter().map(|file| file.path()).collect::<BTreeSet<_>>();
+    let method_paths = methods.files().iter().map(|file| file.path()).collect::<BTreeSet<_>>();
+    let shared = operation_paths.intersection(&method_paths).copied().collect::<Vec<_>>();
+    assert!(shared.is_empty(), "operation and method plans share {shared:?}");
+
+    let root = temp_root("coexist");
+    let operation_write = operations.write_to(&root).expect("operation write");
+    let method_write = methods.write_to(&root).expect("method write");
+    assert_eq!(operation_write.written().len(), operation_paths.len());
+    assert_eq!(method_write.written().len(), method_paths.len());
+
+    let operation_server = fs::read_to_string(root.join("hermes/server.ts")).expect("operation server readable");
+    let method_server = fs::read_to_string(root.join("hermes/service/server.ts")).expect("method server readable");
+    assert!(operation_server.contains("bindOperationHandlers"));
+    assert!(method_server.contains("export function bindService"));
+
+    let operation_template = root.join("hermes/handlers.ts");
+    let method_template = root.join("hermes/service/handlers.ts");
+    fs::write(&operation_template, "// operation handlers\n").expect("write operation handlers");
+    fs::write(&method_template, "// method handlers\n").expect("write method handlers");
+
+    let operation_again = operations.write_to(&root).expect("second operation write");
+    assert!(operation_again.written().is_empty(), "operation write touched files: {:?}", operation_again.written());
+    assert_eq!(operation_again.skipped(), &["hermes/handlers.ts".to_string()]);
+
+    let method_again = methods.write_to(&root).expect("second method write");
+    assert!(method_again.written().is_empty(), "method write touched files: {:?}", method_again.written());
+    assert_eq!(method_again.skipped(), &["hermes/service/handlers.ts".to_string()]);
+
+    assert_eq!(fs::read_to_string(&operation_template).expect("operation handlers readable"), "// operation handlers\n");
+    assert_eq!(fs::read_to_string(&method_template).expect("method handlers readable"), "// method handlers\n");
 
     fs::remove_dir_all(&root).expect("cleanup temp root");
 }

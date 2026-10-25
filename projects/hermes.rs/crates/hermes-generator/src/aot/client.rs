@@ -1,16 +1,13 @@
-//! `client.ts` 渲染。
+//! `hermes/service/client.ts` 渲染。
 //!
 //! client 是普通 AOT 源码：不 import 任何 Hermes npm 包或 runtime，只声明
 //! transport-neutral 的 dispatch 注入点。desktop 与 web 的差异只有 server-stream
 //! 的返回值形状，文件之间不互相 import 宿主实现。
 
 use crate::{
-    aot::{AotTarget, Bindings, dispatch_name, stream_result},
+    aot::{AotTarget, Bindings, dispatch_name, output_path, stream_result},
     plan::{FileOwnership, GeneratedFile},
 };
-
-/// client 模块路径。
-pub(crate) const CLIENT_PATH: &str = "hermes/client.ts";
 
 /// 渲染 client 模块。
 pub(crate) fn render(bindings: &Bindings, target: AotTarget) -> GeneratedFile {
@@ -78,5 +75,5 @@ pub(crate) fn render(bindings: &Bindings, target: AotTarget) -> GeneratedFile {
     }
     out.push_str("  };\n}\n");
 
-    GeneratedFile::new(CLIENT_PATH, out, FileOwnership::Generated)
+    GeneratedFile::new(output_path("client.ts"), out, FileOwnership::Generated)
 }

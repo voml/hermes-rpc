@@ -8,8 +8,10 @@
 //! method 级入口 [`generate_service`] 直接消费上游 `vos/hermes.contract/v0` 的
 //! [`vos_types::ContractArtifact`]：按 service method 生成 identity 常量、
 //! transport-neutral client、route 表、server 绑定、metadata 与一次性 handler
-//! 模板。operation 级 [`generate`] 保留为底层能力，仍消费 operation projection
-//! artifact 并只承认 `op_` 调用面。
+//! 模板。method 级文件全部落在 `hermes/service/` 子目录，operation 级
+//! [`generate`] 保留为底层能力，仍消费 operation projection artifact、只承认
+//! `op_` 调用面并占用 `hermes/operations.ts`、`hermes/server.ts` 与
+//! `hermes/handlers.ts`。两类计划写进同一项目时路径无交集，互不覆盖。
 //!
 //! 类型映射是保守表：无法安全对应到 TS 的名字降级为 `unknown`，user 类型输出
 //! nominal 引用，二者都产生诊断，不臆造更窄的类型也不会静默丢弃信息。

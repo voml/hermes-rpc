@@ -5,6 +5,10 @@
 //! route 表、server handler 绑定、metadata 与一次性业务模板。生成物不写入任何
 //! Hermes runtime 依赖，宿主协议与框架由目标项目自行选择。
 //!
+//! 全部 method 级文件落在 [`OUTPUT_DIR`] 子目录，与 operation 级的
+//! `hermes/operations.ts`、`hermes/server.ts`、`hermes/handlers.ts` 不共享任何
+//! 路径，两类计划可以写进同一个项目而不会互相覆盖。
+//!
 //! operation 级 [`crate::generate`] 保留为底层能力：它消费 operation projection
 //! artifact，本模块只承认 service method 调用面。
 
@@ -52,6 +56,18 @@ impl AotTarget {
             Self::Web => "ReadableStream",
         }
     }
+}
+
+/// method 级生成物的独立子目录。
+///
+/// operation 级占用 `hermes/operations.ts`、`hermes/server.ts` 与
+/// `hermes/handlers.ts`；method 级不得复用其中任何同名文件，否则两类计划写进
+/// 同一项目时会互相覆盖，`Template` 的一次性语义也随之失效。
+pub(crate) const OUTPUT_DIR: &str = "hermes/service";
+
+/// method 级生成物的完整相对路径。
+pub(crate) fn output_path(file_name: &str) -> String {
+    format!("{OUTPUT_DIR}/{file_name}")
 }
 
 /// 从 `vos/hermes.contract/v0` artifact 生成 method 级文件计划。
