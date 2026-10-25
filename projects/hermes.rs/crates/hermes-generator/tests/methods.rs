@@ -310,7 +310,7 @@ fn rejects_methods_bound_to_operations_outside_the_payload() {
 }
 
 #[test]
-fn unmapped_generic_types_report_diagnostics_and_keep_unknown() {
+fn unmapped_generic_types_are_rejected_instead_of_emitting_unknown() {
     let artifact = artifact_with(|payload| {
         payload.services[0].methods[0].request_type = ResolvedCanonicalType::Generic {
             path: vec!["Set".to_string()],
@@ -318,13 +318,12 @@ fn unmapped_generic_types_report_diagnostics_and_keep_unknown() {
         };
     });
 
-    let plan = generate_service(&artifact, AotTarget::Desktop).expect("generation still succeeds");
-    assert!(
-        plan.diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.message().contains("request: generic type `Set` cannot be mapped to TypeScript")),
-        "expected a generic mapping diagnostic, got {:?}",
-        plan.diagnostics()
-    );
-    assert!(contents_of(&plan, "hermes/service/client.ts").contains("create(request: unknown, options?: CallOptions)"));
+    match generate_service(&artifact, AotTarget::Desktop).expect_err("unmapped generic must be rejected") {
+        GeneratorError::Artifact(error) => {
+            assert_eq!(error.code, "GEN002");
+            assert!(error.message.contains("method `IdentityService.create` request: generic type `Set`"), "{error:?}");
+            assert!(!error.message.contains("unknown"), "the error must not describe an `unknown` fallback: {error:?}");
+        }
+        other => panic!("expected a structured mapping error, got {other}"),
+    }
 }

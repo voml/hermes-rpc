@@ -73,7 +73,7 @@ pub(crate) fn output_path(file_name: &str) -> String {
 /// 从 `vos/hermes.contract/v0` artifact 生成 method 级文件计划。
 ///
 /// 非 Hermes 格式与不满足上游合同校验的 artifact 直接拒绝。类型无法完整映射时
-/// 生成诊断并保留 `unknown`，不会把诊断丢弃后宣称生成成功。
+/// 返回结构化 [`GeneratorError`]，不会降级成 `unknown` 后宣称生成成功。
 pub fn generate_service(artifact: &ContractArtifact, target: AotTarget) -> Result<GenerationPlan, GeneratorError> {
     if artifact.version != ContractFormat::Hermes {
         return Err(GeneratorError::UnsupportedContractFormat { found: artifact.version.as_str() });
@@ -169,7 +169,7 @@ fn build(artifact: &ContractArtifact) -> Result<Bindings, GeneratorError> {
                 return Err(GeneratorError::DuplicateRoute { route: format!("{}.{}", service.name, camel_case(&method.name)) });
             }
 
-            let (request, response) = map_method_types(service, method, &mut users, &mut diagnostics);
+            let (request, response) = map_method_types(service, method, &mut users, &mut diagnostics)?;
             methods.push(MethodBinding {
                 raw_name: method.name.clone(),
                 ts_name: camel_case(&method.name),
@@ -198,7 +198,7 @@ fn build(artifact: &ContractArtifact) -> Result<Bindings, GeneratorError> {
         return Err(GeneratorError::IdentifierCollision { identifier: identifier.clone(), sources: sources.clone() });
     }
     if let Some((identifier, sources)) = users.collision() {
-        return Err(GeneratorError::IdentifierCollision { identifier, sources });
+        return Err(GeneratorError::NamingCollision { identifier, operations: sources });
     }
 
     dedupe(&mut diagnostics);
@@ -211,18 +211,31 @@ fn map_method_types(
     method: &ServiceMethodContract,
     users: &mut types::UserTypes,
     diagnostics: &mut Vec<Diagnostic>,
-) -> (String, String) {
-    let request = types::map(&method.request_type, users);
+) -> Result<(String, String), GeneratorError> {
+    let request = types::map(&method.request_type, users)
+        .map_err(|error| annotate(error, &format!("method `{}.{}` request", service.name, method.name)))?;
     for issue in request.issues {
         diagnostics.push(Diagnostic::new(format!("method `{}.{}` request: {issue}", service.name, method.name)));
     }
 
-    let response = types::map(&method.response_type, users);
+    let response = types::map(&method.response_type, users)
+        .map_err(|error| annotate(error, &format!("method `{}.{}` response", service.name, method.name)))?;
     for issue in response.issues {
         diagnostics.push(Diagnostic::new(format!("method `{}.{}` response: {issue}", service.name, method.name)));
     }
 
-    (request.ts, response.ts)
+    Ok((request.ts, response.ts))
+}
+
+/// 给结构化类型映射错误补上 service / method 上下文，保留原始错误码。
+fn annotate(error: GeneratorError, context: &str) -> GeneratorError {
+    match error {
+        GeneratorError::Artifact(mut error) => {
+            error.message = format!("{context}: {}", error.message);
+            GeneratorError::Artifact(error)
+        }
+        other => other,
+    }
 }
 
 /// service fingerprint 直接复用上游规则，不另造 identity。

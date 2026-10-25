@@ -1,16 +1,26 @@
 //! `ResolvedCanonicalType` → TypeScript 类型表达式。
 //!
 //! 合同 artifact 只携带 durable identity 与 canonical type，不携带用户类型的字段
-//! 形状。因此 user 类型映射成携带 `type_id` 的 nominal 引用，并产生明确的诊断；
-//! 未知 generic 或 literal 参数同样降级为 `unknown` 并报诊断，不静默丢失信息。
+//! 形状。因此 user 类型映射成携带 `type_id` 的 nominal 引用，并产生明确的诊断。
+//! 其余分支必须逐项可映射：标量与 `Reference` / `Optional` / `List` 包装直接转写，
+//! 已知泛型按容器转写。未知泛型、literal 参数与未冻结的 `json` / `value` / `any`
+//! 返回结构化 [`GeneratorError`]，绝不降级成 `unknown` 后宣称生成成功。
 
 use std::collections::BTreeMap;
 
-use vos_types::{CanonicalScalar, ResolvedCanonicalType, ResolvedCanonicalTypeArgument};
+use vos_types::{ArtifactError, CanonicalScalar, ResolvedCanonicalType, ResolvedCanonicalTypeArgument};
 
-use crate::naming::pascal_case;
+use crate::{naming::pascal_case, plan::GeneratorError};
 
-const UNKNOWN: &str = "unknown";
+/// 未冻结类型名：不能安全映射到 TypeScript，必须显式拒绝。
+const UNFROZEN_TYPES: [&str; 3] = ["json", "value", "any"];
+
+/// 错误码：artifact 声明了未冻结的 `json` / `value` / `any` 类型。
+const UNFROZEN_TYPE_CODE: &str = "GEN001";
+/// 错误码：未知 generic 或参数个数不匹配。
+const UNSUPPORTED_GENERIC_CODE: &str = "GEN002";
+/// 错误码：无法转写的 literal generic 参数。
+const LITERAL_ARGUMENT_CODE: &str = "GEN003";
 
 /// 一次类型映射的结果。
 pub(crate) struct MappedType {
@@ -64,33 +74,40 @@ impl UserTypes {
 }
 
 /// 映射一个 canonical type。
-pub(crate) fn map(ty: &ResolvedCanonicalType, users: &mut UserTypes) -> MappedType {
+pub(crate) fn map(ty: &ResolvedCanonicalType, users: &mut UserTypes) -> Result<MappedType, GeneratorError> {
     match ty {
-        ResolvedCanonicalType::Scalar(scalar) => MappedType { ts: scalar_ts(*scalar).to_string(), issues: Vec::new() },
+        ResolvedCanonicalType::Scalar(scalar) => Ok(MappedType { ts: scalar_ts(*scalar).to_string(), issues: Vec::new() }),
         ResolvedCanonicalType::User { path, type_id } => {
+            reject_unfrozen(path)?;
             let name = users.bind(path, *type_id);
-            MappedType {
+            Ok(MappedType {
                 ts: name.clone(),
                 issues: vec![format!(
                     "user type `{}` carries no field shape in the contract artifact, emitted nominal reference `{name}`",
                     display_path(path)
                 )],
-            }
+            })
         }
         ResolvedCanonicalType::Reference(inner) => map(inner, users),
         ResolvedCanonicalType::Optional(inner) => {
-            let inner = map(inner, users);
-            MappedType { ts: format!("{} | null", parenthesize(&inner.ts)), issues: inner.issues }
+            let inner = map(inner, users)?;
+            Ok(MappedType { ts: format!("{} | null", parenthesize(&inner.ts)), issues: inner.issues })
         }
         ResolvedCanonicalType::List(inner) => {
-            let inner = map(inner, users);
-            MappedType { ts: format!("{}[]", parenthesize(&inner.ts)), issues: inner.issues }
+            let inner = map(inner, users)?;
+            Ok(MappedType { ts: format!("{}[]", parenthesize(&inner.ts)), issues: inner.issues })
         }
         ResolvedCanonicalType::Generic { path, arguments } => map_generic(path, arguments, users),
     }
 }
 
-fn map_generic(path: &[String], arguments: &[ResolvedCanonicalTypeArgument], users: &mut UserTypes) -> MappedType {
+fn map_generic(
+    path: &[String],
+    arguments: &[ResolvedCanonicalTypeArgument],
+    users: &mut UserTypes,
+) -> Result<MappedType, GeneratorError> {
+    reject_unfrozen(path)?;
+
     let name = path.last().map(|segment| segment.to_ascii_lowercase()).unwrap_or_default();
     let mut issues = Vec::new();
     let mut args = Vec::with_capacity(arguments.len());
@@ -98,28 +115,52 @@ fn map_generic(path: &[String], arguments: &[ResolvedCanonicalTypeArgument], use
     for argument in arguments {
         match argument {
             ResolvedCanonicalTypeArgument::Type(ty) => {
-                let mapped = map(ty, users);
+                let mapped = map(ty, users)?;
                 issues.extend(mapped.issues);
                 args.push(mapped.ts);
             }
             ResolvedCanonicalTypeArgument::Literal(text) => {
-                issues
-                    .push(format!("literal generic argument `{text}` cannot be mapped to TypeScript, emitted as `{UNKNOWN}`"));
-                args.push(UNKNOWN.to_string());
+                return Err(mapping_error(
+                    LITERAL_ARGUMENT_CODE,
+                    format!("literal generic argument `{text}` cannot be mapped to TypeScript"),
+                ));
             }
         }
     }
 
-    match (name.as_str(), args.len()) {
-        ("list" | "array" | "vec", 1) => MappedType { ts: format!("{}[]", parenthesize(&args[0])), issues },
-        ("optional" | "option", 1) => MappedType { ts: format!("{} | null", parenthesize(&args[0])), issues },
-        ("map" | "record" | "dict", 2) => MappedType { ts: format!("Record<{}, {}>", args[0], args[1]), issues },
+    let ts = match (name.as_str(), args.as_slice()) {
+        ("list" | "array" | "vec", [single]) => format!("{}[]", parenthesize(single)),
+        ("optional" | "option", [single]) => format!("{} | null", parenthesize(single)),
+        ("map" | "record" | "dict", [key, value]) => format!("Record<{key}, {value}>"),
         _ => {
-            issues
-                .push(format!("generic type `{}` cannot be mapped to TypeScript, emitted as `{UNKNOWN}`", display_path(path)));
-            MappedType { ts: UNKNOWN.to_string(), issues }
+            return Err(mapping_error(
+                UNSUPPORTED_GENERIC_CODE,
+                format!("generic type `{}` cannot be mapped to TypeScript", display_path(path)),
+            ));
         }
+    };
+
+    Ok(MappedType { ts, issues })
+}
+
+/// 拒绝上游尚未冻结、也没有稳定 TS 语义的类型名。
+fn reject_unfrozen(path: &[String]) -> Result<(), GeneratorError> {
+    let Some(name) = path.last()
+    else {
+        return Ok(());
+    };
+    let name = name.to_ascii_lowercase();
+    if UNFROZEN_TYPES.contains(&name.as_str()) {
+        return Err(mapping_error(
+            UNFROZEN_TYPE_CODE,
+            format!("unfrozen type `{}` cannot be mapped to TypeScript", display_path(path)),
+        ));
     }
+    Ok(())
+}
+
+fn mapping_error(code: &str, message: String) -> GeneratorError {
+    GeneratorError::Artifact(ArtifactError { code: code.to_owned(), message })
 }
 
 fn scalar_ts(scalar: CanonicalScalar) -> &'static str {

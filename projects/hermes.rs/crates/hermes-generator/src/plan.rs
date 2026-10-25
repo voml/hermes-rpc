@@ -54,7 +54,7 @@ impl fmt::Display for GeneratorError {
         match self {
             Self::Artifact(err) => write!(f, "artifact error: {}", err.message),
             Self::NamingCollision { identifier, operations } => {
-                write!(f, "operations {} all normalize to TypeScript identifier `{identifier}`", operations.join(", "))
+                write!(f, "contract names {} all normalize to TypeScript identifier `{identifier}`", operations.join(", "))
             }
             Self::Io(err) => write!(f, "io error: {err}"),
             Self::UnsupportedContractFormat { found } => {

@@ -13,8 +13,10 @@
 //! `op_` 调用面并占用 `hermes/operations.ts`、`hermes/server.ts` 与
 //! `hermes/handlers.ts`。两类计划写进同一项目时路径无交集，互不覆盖。
 //!
-//! 类型映射是保守表：无法安全对应到 TS 的名字降级为 `unknown`，user 类型输出
-//! nominal 引用，二者都产生诊断，不臆造更窄的类型也不会静默丢弃信息。
+//! method 级类型映射不降级：标量与包装逐项转写，user 类型输出 nominal 引用并
+//! 产生诊断，未知 generic、literal 参数与未冻结的 `json` / `value` / `any` 直接
+//! 返回结构化 `GeneratorError`。operation 级临时映射表仍对未解析名字保留
+//! `unknown` 并报诊断。
 //!
 //! 文件所有权分两类：`Generated` 每次重建，`Template` 只在缺失时创建，重复
 //! 生成不覆盖用户已实现的 handler。
