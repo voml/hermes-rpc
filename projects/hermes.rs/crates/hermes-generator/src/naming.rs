@@ -100,6 +100,11 @@ pub(crate) fn property_key(raw: &str) -> String {
     if is_identifier(raw) {
         return raw.to_string();
     }
+    string_literal(raw)
+}
+
+/// 把任意文本渲染成 TS / JS 双引号字符串字面量。
+pub(crate) fn string_literal(raw: &str) -> String {
     let mut escaped = String::with_capacity(raw.len() + 2);
     escaped.push('"');
     for c in raw.chars() {

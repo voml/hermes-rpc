@@ -1,0 +1,158 @@
+{
+  "version": "vos/hermes.contract/v0",
+  "producer": {
+    "name": "fixture",
+    "version": "0"
+  },
+  "fingerprint": "0e1b70da631da8ff9da8861133e249853ea1b8a4dafa24a6b5cea70ae2b881c7",
+  "payload": {
+    "operations": [
+      {
+        "operationId": "op_38ecee3afe0deee18f4f4c89f7b33c390d84844a3bf0832632f2f612cd132437",
+        "kind": "query",
+        "name": "create",
+        "canonicalPath": [
+          "demo",
+          "auth",
+          "create"
+        ],
+        "parameters": [
+          {
+            "name": "request",
+            "canonicalType": {
+              "user": {
+                "path": [
+                  "demo",
+                  "auth",
+                  "CreateRequest"
+                ],
+                "typeId": 1
+              }
+            }
+          }
+        ],
+        "resultType": {
+          "user": {
+            "path": [
+              "demo",
+              "auth",
+              "Identity"
+            ],
+            "typeId": 2
+          }
+        },
+        "cardinality": "one",
+        "effect": "write",
+        "capabilities": [],
+        "sourceUnitId": 0,
+        "span": {
+          "start": 102,
+          "end": 163
+        }
+      },
+      {
+        "operationId": "op_c9d4e9ea491ec269e6681aa00b353d24269e48702ae07081cd65cea635361d5d",
+        "kind": "query",
+        "name": "lookup",
+        "canonicalPath": [
+          "demo",
+          "auth",
+          "lookup"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "canonicalType": {
+              "scalar": "uuid"
+            }
+          }
+        ],
+        "resultType": {
+          "optional": {
+            "user": {
+              "path": [
+                "demo",
+                "auth",
+                "Identity"
+              ],
+              "typeId": 2
+            }
+          }
+        },
+        "cardinality": "one",
+        "effect": "read",
+        "capabilities": [],
+        "sourceUnitId": 0,
+        "span": {
+          "start": 165,
+          "end": 213
+        }
+      }
+    ],
+    "services": [
+      {
+        "serviceId": "svc_9840335d138fd4c32651c498ecd3f0c9aa05cf5433828d9df268aad47c9cfbc1",
+        "name": "IdentityService",
+        "canonicalPath": [
+          "demo",
+          "auth",
+          "IdentityService"
+        ],
+        "methods": [
+          {
+            "methodId": "mtd_a1195cc42bc0418387f233d5db60833493a2aecab3923e75c97be3509f0aecfd",
+            "name": "create",
+            "requestType": {
+              "user": {
+                "path": [
+                  "demo",
+                  "auth",
+                  "CreateRequest"
+                ],
+                "typeId": 1
+              }
+            },
+            "responseType": {
+              "user": {
+                "path": [
+                  "demo",
+                  "auth",
+                  "Identity"
+                ],
+                "typeId": 2
+              }
+            },
+            "stream": "unary",
+            "operationId": "op_38ecee3afe0deee18f4f4c89f7b33c390d84844a3bf0832632f2f612cd132437"
+          },
+          {
+            "methodId": "mtd_8209e030c55458c829b98b16cd5cb582db22fca4ec29fcc991241dfc36ce3ff8",
+            "name": "lookup",
+            "requestType": {
+              "scalar": "uuid"
+            },
+            "responseType": {
+              "optional": {
+                "user": {
+                  "path": [
+                    "demo",
+                    "auth",
+                    "Identity"
+                  ],
+                  "typeId": 2
+                }
+              }
+            },
+            "stream": "server-stream",
+            "operationId": "op_c9d4e9ea491ec269e6681aa00b353d24269e48702ae07081cd65cea635361d5d"
+          }
+        ],
+        "sourceUnitId": 0,
+        "span": {
+          "start": 215,
+          "end": 323
+        }
+      }
+    ]
+  }
+}

@@ -21,6 +21,32 @@ pub enum GeneratorError {
     },
     /// ?????
     Io(std::io::Error),
+    /// artifact 声明的产品格式不是 Hermes。
+    UnsupportedContractFormat {
+        /// artifact 实际声明的完整格式字符串。
+        found: &'static str,
+    },
+    /// 两个合同名规范化成同一个 TypeScript 标识符。
+    IdentifierCollision {
+        /// 规范化后的标识符。
+        identifier: String,
+        /// 冲突的合同名。
+        sources: Vec<String>,
+    },
+    /// 一个 service 内的两个方法规范化成同一条路由。
+    DuplicateRoute {
+        /// service 原始名与规范化后的方法标识符组成的路由。
+        route: String,
+    },
+    /// method 绑定的 operation 不在同一 artifact 的 payload 中。
+    MissingOperationBinding {
+        /// service 原始名。
+        service: String,
+        /// method 原始名。
+        method: String,
+        /// 缺失的 operation identity。
+        operation_id: String,
+    },
 }
 
 impl fmt::Display for GeneratorError {
@@ -31,6 +57,16 @@ impl fmt::Display for GeneratorError {
                 write!(f, "operations {} all normalize to TypeScript identifier `{identifier}`", operations.join(", "))
             }
             Self::Io(err) => write!(f, "io error: {err}"),
+            Self::UnsupportedContractFormat { found } => {
+                write!(f, "generator accepts only `vos/hermes.contract/v0`, found `{found}`")
+            }
+            Self::IdentifierCollision { identifier, sources } => {
+                write!(f, "contract names {} all normalize to TypeScript identifier `{identifier}`", sources.join(", "))
+            }
+            Self::DuplicateRoute { route } => write!(f, "duplicate route `{route}`"),
+            Self::MissingOperationBinding { service, method, operation_id } => {
+                write!(f, "method `{service}.{method}` binds operation `{operation_id}` which is not present in the artifact")
+            }
         }
     }
 }
@@ -40,7 +76,11 @@ impl std::error::Error for GeneratorError {
         match self {
             Self::Artifact(_) => None,
             Self::Io(err) => Some(err),
-            Self::NamingCollision { .. } => None,
+            Self::NamingCollision { .. }
+            | Self::UnsupportedContractFormat { .. }
+            | Self::IdentifierCollision { .. }
+            | Self::DuplicateRoute { .. }
+            | Self::MissingOperationBinding { .. } => None,
         }
     }
 }
