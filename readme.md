@@ -1,55 +1,50 @@
 # Hermes RPC
 
-Hermes 是 VMZ 体系中的 RPC 协议宿主与服务消费端。
+Hermes 是 VMZ 的 **RPC 合同消费者、AOT 生成器与协议服务宿主**。它消费 [`vos-language`](https://github.com/voml/vos-language) 产出的 frozen contract artifact（`vos/hermes.contract/v0`），按其中的 `ServiceContract` / `ServiceMethodContract`、`MethodId` 与 `OperationId` 注册、路由并生成 RPC 代码。
 
-## 当前状态
+## 设计真相源
 
-**旧栈已冻结。** 2026-10-23 之前的 `vos-ast` / `vos-for-rust` / `vos-openapi` / `vos-cli` / `vos-faker` 原型已从 workspace 移除——它们依赖的 `diagnostic-quick 0.4.0` 与当前 `diagnostic` crate 不兼容，且 Hermes 已决定**不再自建 parser/AST**。
+架构、阶段门与验收标准以 **VMZ 根设计仓的 Hermes 架构文档** 为准。本仓文档只描述目录、入口与验证方式，不重复、不覆盖、也不私有化设计决策；两者冲突时以设计真相源为准。
 
-**新主链**：Hermes 消费 [`vos-language`](https://github.com/voml/vos-language) 产出的 frozen contract artifact（`vos/hermes.contract/v0`），按其中的 `ServiceContract` / `OperationContract`、`MethodId` 与 `OperationId` 注册并路由 RPC 调用。
+## 给 agent 的阅读顺序
+
+按顺序读，约 5 分钟即可建立全局认识，避免逐文件扫描：
+
+1. **本文件** —— 定位、目录与边界。
+2. **`projects/hermes.rs/crates/hermes-runtime/src/lib.rs`** —— 领域核心：artifact loader、`ContractRegistry`、`(service, method)` 路由、dispatch、codec、lifecycle、结构化错误。RPC 语义都在这里。
+3. **`projects/hermes.rs/crates/hermes-generator/src/lib.rs`** —— AOT 生成入口 `generate_service`，产物固定落在 `hermes/service/`。
+4. **`hermes-napi/src/lib.rs`** 与 **`hermes-wasm/src/lib.rs`** —— 两个宿主边界：Node 多协议 server 宿主、浏览器 WASM。
+5. **TypeScript 侧** —— `packages/hermes`（Node N-API 客户端）、`packages/hermes-language`（浏览器封装）、`platforms/hermes-unknown-wasm32`（wasm 绑定产物）。
+6. 改代码前先确认下方「硬边界」。
 
 ## 工作区结构
 
 ```
 hermes-rpc/
-├── Cargo.toml                      # workspace 入口
+├── Cargo.toml                          # workspace：仅 4 个 Rust crate
 ├── projects/
-│   ├── hermes.rs/crates/           # Rust：runtime / generator / napi
+│   ├── hermes.rs/crates/
+│   │   ├── hermes-runtime/             # RPC 领域运行时
+│   │   ├── hermes-generator/           # AOT 生成器
+│   │   ├── hermes-napi/                # N-API 宿主（server 侧）
+│   │   └── hermes-wasm/                # WASM 宿主（Web 侧）
 │   └── hermes.ts/
-│       ├── packages/               # `@yydb/hermes`、skills
-│       └── platforms/              # 各平台 N-API addon
+│       ├── packages/                   # @yydb/hermes、@yydb/hermes-language、skills
+│       └── platforms/                  # 各平台 N-API addon + unknown-wasm32
 ```
 
-## 上游 `vos-types`（`vos-language`）
+## 硬边界（改代码前必读）
 
-Hermes **不** vendor 本地镜像 crate；contract artifact 类型、identity、fingerprint 与 canonical type 直接依赖上游 `vos-types`（git `dev`，本地开发可用 `.cargo/config.toml` path patch）。
+- **Hermes 不解析 VOS 源码。** VOS 文本 → contract artifact 在 `vos-language` 侧完成；本仓只消费 artifact，不读 `body` 文本、不自建 method 绑定表。
+- **不提供官方 client runtime。** client 由 `ServiceContract` AOT 生成普通源码，transport 由目标项目用已有框架实现。
+- **不 vendor 本地类型镜像。** 合同类型、identity、fingerprint、canonical type 直接依赖上游 `vos-types`（git `dev`）；本仓只做 serde mirror 与一致性校验。
+- **server 统一走 N-API 多协议宿主。** Hermes 不自建通用 HTTP server，部署与 transport 具体实现归宿主。
+- **Web 只做 Web。** `@yydb/hermes-language` 只基于 `@yydb/hermes-unknown-wasm32`，不依赖 `@yydb/hermes`；生成物、包、WASM 三层禁止反向依赖。
+- **1.0.0 前不保留兼容层。** 旧 `vos-ast` / `vos-for-rust` / `vos-openapi` / `vos-cli` / `vos-faker` 已移出 workspace，不恢复、不 wrapper。
 
-- **artifact 合同**：`ContractArtifact` / `ServiceContract` / `OperationContract`，直接复用上游 serde 形状与校验，未知字段、未知版本、指纹不匹配与 producer 缺失由上游诊断码（`ART010` / `ART020` / `ART021`）拒绝。
-- **错误层**：`ArtifactError` 在 RPC 边界映射为 `RpcError`，上游诊断码原样保留在 `diagnostic_code`。
+## 文档约定
 
-## `hermes-runtime` 提供
-
-- `parse_contract_artifact` / `JsonContractLoader`——只接受 `vos/hermes.contract/v0`，不解析 VOS 源文本
-- `ContractRegistry`——`service 名 + method 名` → `MethodId` → `OperationId`，重复 service / method / operation 与悬空 method 绑定在注册期拒绝，查找失败返回结构化错误
-- `HermesDispatcher` / `HermesOperationHandler`——按解析出的 `operation_id` 路由到用户 handler，`OperationReply` 区分 unary 与 server-stream
-- `WireCodec` / `codec_for`——`ResolvedCanonicalType` 的 wire 表达，`utf8` 与 `utf16` 不合并，未声明 generic 直接拒绝
-- `HermesDispatchRequest` / `HermesDispatchResponse`——请求携带 `service` + `method` + `params`，响应回填解析出的 durable id
-- `RpcError` / `RpcErrorCode`——稳定错误码族，wire 错误体为 `{"code": "...", "message": "..."}`，artifact 错误额外带 `diagnosticCode`
-- `CallOptions` / `CancelToken` / `CallContext`——dispatch 生命周期：deadline、取消与在途并发上限
-
-## `hermes-generator` 提供
-
-- `generate` / `generate_from_json`——从 operation artifact 产出 `GenerationPlan`
-- `hermes/operations.ts`——operation id 常量、参数 / 返回类型与 `createHermesClient(transport)`
-- `hermes/server.ts`——按 `operation_id` 绑定 handler 的 `bindOperationHandlers()`
-- `hermes/handlers.ts`——一次性业务模板，已存在则保留（`FileOwnership::Template`）
-- `Diagnostic`——无法安全映射的类型降级为 `unknown` 并记录诊断，命名冲突直接拒绝
-
-生成物不 import 任何 Hermes npm 包，只声明 `HermesTransport` 接口，由宿主运行时绑定传入。
-
-## 接入 `vos-language`
-
-Hermes 不编译依赖 `vos` crate；它只消费 `vos-language` 产出的 contract artifact JSON。字段命名、identity、fingerprint 与 canonical type 以上游 `vos-types` 为准，集成测试直接加载上游 `operations_services.contract.json` fixture 并重新封装成 Hermes 格式，证明 payload 逐字段等价。
+本仓只保留：本入口 README、各 npm 包的发布 README（`package.json` 的 `files` 依赖它们）、以及 `hermes-skills` 的 SKILL/README。新增设计说明一律写入根设计仓，不在本仓创建 `docs/`、交接文档或第二份架构说明。
 
 ## 验证
 
@@ -57,10 +52,4 @@ Hermes 不编译依赖 `vos` crate；它只消费 `vos-language` 产出的 contr
 cargo test --workspace
 ```
 
-53 个测试全部通过：28 个 runtime 合同 / registry / dispatch 测试 + 10 个 generator 测试 + 15 个 wasm binding 测试。
-
-## 设计约束
-
-- **Hermes 不解析 VOS 源码**：VOS 文本 → ServiceContract artifact 在 `vos-language` 侧完成；Hermes 只消费 artifact。
-- **1.0.0 前不保留旧 API 兼容层**：旧原型一旦无法编译就直接移除，不做 wrapper、alias、fallback 或双读双写。
-- **错误自定**：Hermes 运行时错误模型独立于 `vos-language` 上游，避免跨仓耦合。
+2026-10-25 全绿：85 个测试（runtime 合同 / registry / dispatch / codec、generator、wasm binding）。

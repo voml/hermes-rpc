@@ -17,11 +17,11 @@ Never use an HTTP path, JSON-RPC method string, or source name as a substitute f
 
 ## Current status
 
-`vos-core` is this repository's host for the VOS language standard: schema modeling plus serde mirrors of the upstream service and operation projection artifacts. It is not legacy. The `vos-ast`, `vos-for-rust`, `vos-faker`, `vos-openapi`, and `vos-cli` projects are frozen legacy material — do not extend them or present them as the current Hermes API.
+Hermes has no `vos-core` mirror crate and does not vendor a local copy of the VOS language standard. Contract types come directly from upstream `vos-types`: `ServiceContract` / `ServiceMethodContract` with `methodId`, `name`, `requestType`, `responseType`, `stream`, and `operationId`. The `vos-ast`, `vos-for-rust`, `vos-faker`, `vos-openapi`, and `vos-cli` projects are frozen legacy material, removed from the workspace — do not extend them or present them as the current Hermes API.
 
-`hermes-runtime` owns the RPC domain: artifact loading, registry, routing, dispatch. Service and operation identity (`svc_`, `op_`) is derived upstream and only mirrored here.
+`hermes-runtime` owns the RPC domain: artifact loading, registry, routing, dispatch. Service and operation identity (`svc_`, `op_`) is derived upstream and only mirrored, then recomputed and verified here.
 
-The upstream service projection stops at syntax projection, so it carries no method descriptor yet. Until VOS delivers method-level projection, limit implementation advice to operation-level dispatch and transport-neutral runtime primitives. Do not invent a local method AST, method identity scheme, or generation model to bypass that dependency.
+Hermes does not provide an official client runtime. Clients are plain source generated ahead of time from `ServiceContract` and wired to the target project's own transport. The server side is an N-API multi-protocol host; Web support is limited to the `hermes-wasm` binding. Do not invent a local method AST, a second identity scheme, or a bundled client runtime to bypass those boundaries. Oak `service` body → method-level source projection is an upstream gap; do not fill it by parsing source text in this repository.
 
 ## Review flow
 

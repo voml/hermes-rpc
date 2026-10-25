@@ -1,20 +1,20 @@
-# `@game-gpt/hermes-skills`
+# `@yydb/hermes-skills`
 
 Agent Skills for designing and reviewing Hermes RPC work without recreating the VOS language or coupling service identity to a transport.
 
-Hermes is currently being rebuilt around VOS `ServiceContract`. The skill is honest about that status: it can help classify work, review boundaries, and plan runtime behavior, but it does not claim that unfinished Hermes transports or generators already exist.
+Hermes consumes VOS `ServiceContract` artifacts and performs AOT generation plus protocol hosting; it does not provide an official client runtime or parse VOS source. The skill helps classify work, review boundaries, and plan runtime behavior, and it does not claim unfinished transports or generators already exist.
 
 ## Install
 
 ```bash
-npx skills add @game-gpt/hermes-skills --skill hermes-rpc -y
+npx skills add @yydb/hermes-skills --skill hermes-rpc -y
 ```
 
 Preview or install globally:
 
 ```bash
-npx skills add @game-gpt/hermes-skills --list
-npx skills add @game-gpt/hermes-skills --skill hermes-rpc -y -g
+npx skills add @yydb/hermes-skills --list
+npx skills add @yydb/hermes-skills --skill hermes-rpc -y -g
 ```
 
 ## Start with a prompt

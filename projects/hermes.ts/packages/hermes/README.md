@@ -1,6 +1,9 @@
 # @yydb/hermes
 
-Hermes RPC runtime — VOS operation artifact loader and dispatch for Node.js.
+Hermes RPC runtime for Node.js — loads `vos/hermes.contract/v0` service
+contract artifacts and dispatches `(service, method)` calls through the Rust
+`hermes-runtime`. It is the Node entry to the N-API host boundary, not a
+standalone HTTP framework; transport and deployment belong to the host.
 
 Provides platform-specific N-API binaries (Linux, macOS, Windows). Browser,
 edge and WASI hosts use `@yydb/hermes-language`, which wraps the Rust

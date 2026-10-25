@@ -1,7 +1,7 @@
 {
   "name": "@yydb/hermes",
   "version": "0.0.4",
-  "description": "Hermes RPC runtime — VOS operation artifact loader and dispatch for Node.js (N-API binaries)",
+  "description": "Hermes RPC runtime — vos/hermes.contract/v0 service contract loader and (service, method) dispatch for Node.js (N-API binaries)",
   "type": "module",
   "license": "MPL-2.0",
   "sideEffects": false,
