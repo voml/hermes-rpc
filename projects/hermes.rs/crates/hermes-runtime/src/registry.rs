@@ -52,6 +52,8 @@ pub struct ContractRegistry {
     services: BTreeMap<ServiceId, ServiceContract>,
     operations: BTreeMap<OperationId, OperationContract>,
     service_names: BTreeMap<String, ServiceId>,
+    /// `MethodId` → `OperationId` 反向索引，供 handler 注册按 method 名查找 operation 使用。
+    method_index: BTreeMap<MethodId, OperationId>,
 }
 
 impl ContractRegistry {
@@ -78,7 +80,7 @@ impl ContractRegistry {
         let mut incoming_services: BTreeMap<ServiceId, ServiceContract> = BTreeMap::new();
         let mut incoming_operations: BTreeMap<OperationId, OperationContract> = BTreeMap::new();
         let mut incoming_names: BTreeMap<String, ServiceId> = BTreeMap::new();
-        let mut method_ids: BTreeSet<MethodId> = BTreeSet::new();
+        let mut incoming_method_index: BTreeMap<MethodId, OperationId> = BTreeMap::new();
 
         for operation in &artifact.payload.operations {
             if self.operations.contains_key(&operation.operation_id)
@@ -112,7 +114,11 @@ impl ContractRegistry {
                 if !method_names.insert(method.name.as_str()) {
                     return Err(duplicate("method name", &format!("{}.{}", service.name, method.name)));
                 }
-                if !method_ids.insert(method.method_id.clone()) {
+                // MethodId 唯一性：同一个 registry 中同一个 MethodId 不能映射到两个 Operation。
+                // 先检查 self.method_index（已挂载 artifact），再检查 incoming_method_index（当前 artifact 内部）。
+                if self.method_index.contains_key(&method.method_id)
+                    || incoming_method_index.contains_key(&method.method_id)
+                {
                     return Err(duplicate("method id", method.method_id.as_str()));
                 }
                 if !incoming_operations.contains_key(&method.operation_id)
@@ -126,6 +132,7 @@ impl ContractRegistry {
                         ),
                     ));
                 }
+                incoming_method_index.insert(method.method_id.clone(), method.operation_id.clone());
             }
             incoming_services.insert(service.service_id.clone(), service.clone());
         }
@@ -137,6 +144,7 @@ impl ContractRegistry {
         self.operations.extend(incoming_operations);
         self.service_names.extend(incoming_names);
         self.services.extend(incoming_services);
+        self.method_index.extend(incoming_method_index);
         Ok(())
     }
 
@@ -161,6 +169,19 @@ impl ContractRegistry {
             )
         })?;
         Ok(MethodRoute { service, method, operation })
+    }
+
+    /// 按 service 名 + method 名直接查对应的 `OperationId`。
+    ///
+    /// 内部复用 [`Self::resolve`] 以保持错误消息一致。
+    pub fn operation_for_method(&self, service_name: &str, method_name: &str) -> RpcResult<OperationId> {
+        let route = self.resolve(service_name, method_name)?;
+        Ok(route.method.operation_id.clone())
+    }
+
+    /// 按 durable `MethodId` 查绑定的 `OperationId`。
+    pub fn operation_id_for_method(&self, method_id: &MethodId) -> Option<&OperationId> {
+        self.method_index.get(method_id)
     }
 
     /// 按 service 名查找 service 合同。
