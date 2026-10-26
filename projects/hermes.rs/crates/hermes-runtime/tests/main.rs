@@ -8,7 +8,7 @@
 //! 内部诊断码保留，以及 registry 冲突、类型不符与 stream 模式不符。
 
 use std::{
-    sync::{Arc, Condvar, Mutex, mpsc},
+    sync::{Arc, Condvar, Mutex, mpsc, atomic::{AtomicUsize, Ordering}},
     thread,
     time::{Duration, Instant},
 };
@@ -274,6 +274,24 @@ fn release_gate(gate: &Arc<(Mutex<bool>, Condvar)>) {
     let (lock, condvar) = &**gate;
     *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
     condvar.notify_all();
+}
+
+/// 记录调用次数的 handler：配合 Arc<AtomicUsize> 断言 dispatch 确实经过了 handler。
+struct CountingHandler {
+    calls: Arc<AtomicUsize>,
+    reply: OperationReply,
+}
+
+impl HermesOperationHandler for CountingHandler {
+    fn execute(
+        &self,
+        _ctx: &hermes_runtime::CallContext,
+        _operation: &OperationContract,
+        _params: &Value,
+    ) -> RpcResult<OperationReply> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.reply.clone())
+    }
 }
 
 fn dispatcher_with_handlers() -> HermesDispatcher {
@@ -940,4 +958,92 @@ fn rpc_error_code_wire_names_are_kebab_case() {
         assert_eq!(code.as_str(), expected);
         assert_eq!(serde_json::to_string(&code).unwrap(), format!("\"{expected}\""));
     }
+}
+
+// ---------------------------------------------------------------------------
+// service.method 路由的直接 Hermes fixture 端到端验证
+// ---------------------------------------------------------------------------
+
+/// 直接加载 Hermes 格式 fixture 文件（不经过 seal_hermes_artifact），
+/// 通过 CountingHandler 的调用计数明确证明 dispatch 经过了完整的
+/// service.method → MethodRoute → OperationId → handler 链路。
+#[test]
+fn dispatch_hermes_fixture_file_via_service_method_routes_unary_and_stream() {
+    // 直接的 vos/hermes.contract/v0 fixture，不需要 seal。
+    const HERMES_FIXTURE: &str = include_str!("fixtures/identity_service.contract.json");
+
+    let mut dispatcher = HermesDispatcher::new();
+    dispatcher.load_contract_artifact(HERMES_FIXTURE).expect("Hermes fixture loads directly");
+
+    // registry 已按 ServiceContract 完整挂载
+    assert_eq!(dispatcher.registry().service_count(), 1);
+    assert_eq!(dispatcher.registry().operation_count(), 2);
+
+    let create_calls = Arc::new(AtomicUsize::new(0));
+    let lookup_calls = Arc::new(AtomicUsize::new(0));
+
+    dispatcher
+        .register_handler(
+            CREATE_OP,
+            Box::new(CountingHandler {
+                calls: create_calls.clone(),
+                reply: OperationReply::Unary(json!({ "id": USER_ID, "displayName": "Ada" })),
+            }),
+        )
+        .expect("create handler registered");
+    dispatcher
+        .register_handler(
+            LOOKUP_OP,
+            Box::new(CountingHandler {
+                calls: lookup_calls.clone(),
+                reply: OperationReply::ServerStream(vec![json!({ "id": USER_ID })]),
+            }),
+        )
+        .expect("lookup handler registered");
+
+    // 1. 证明 route 解析先拿到了正确的 method_id 和 operation_id
+    let create_route = dispatcher
+        .registry()
+        .resolve("IdentityService", "create")
+        .expect("IdentityService.create route");
+    assert_eq!(create_route.method_id().as_str(), CREATE_METHOD);
+    assert_eq!(create_route.operation_id().as_str(), CREATE_OP);
+    assert_eq!(create_route.stream(), MethodStreamMode::Unary);
+
+    let lookup_route = dispatcher
+        .registry()
+        .resolve("IdentityService", "lookup")
+        .expect("IdentityService.lookup route");
+    assert_eq!(lookup_route.method_id().as_str(), LOOKUP_METHOD);
+    assert_eq!(lookup_route.operation_id().as_str(), LOOKUP_OP);
+    assert_eq!(lookup_route.stream(), MethodStreamMode::ServerStream);
+
+    // 2. dispatch IdentityService.create（unary）
+    let unary = dispatcher
+        .dispatch("IdentityService", "create", &json!({ "request": { "email": "ada@example.com" } }))
+        .expect("unary dispatch succeeds");
+    assert_eq!(unary, DispatchReply::Unary(json!({ "id": USER_ID, "displayName": "Ada" })));
+    assert_eq!(
+        create_calls.load(Ordering::SeqCst),
+        1,
+        "IdentityService.create handler 被调 exactly once"
+    );
+
+    // 3. dispatch IdentityService.lookup（server-stream）
+    let stream = dispatcher
+        .dispatch("IdentityService", "lookup", &json!({ "id": USER_ID }))
+        .expect("stream dispatch succeeds");
+    assert_eq!(stream, DispatchReply::ServerStream(vec![json!({ "id": USER_ID })]));
+    assert_eq!(
+        lookup_calls.load(Ordering::SeqCst),
+        1,
+        "IdentityService.lookup handler 被调 exactly once"
+    );
+
+    // 4. 多次 dispatch 不应影响另一个 handler 的计数
+    dispatcher
+        .dispatch("IdentityService", "create", &json!({ "request": { "email": "bob@example.com" } }))
+        .expect("second unary dispatch");
+    assert_eq!(create_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(lookup_calls.load(Ordering::SeqCst), 1, "lookup handler 计数未受影响");
 }
