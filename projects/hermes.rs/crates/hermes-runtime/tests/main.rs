@@ -1047,3 +1047,80 @@ fn dispatch_hermes_fixture_file_via_service_method_routes_unary_and_stream() {
     assert_eq!(create_calls.load(Ordering::SeqCst), 2);
     assert_eq!(lookup_calls.load(Ordering::SeqCst), 1, "lookup handler 计数未受影响");
 }
+
+// ---------------------------------------------------------------------------
+// method-level handler 注册：按 `service.method` 名或 `MethodId` 注册
+// ---------------------------------------------------------------------------
+
+#[test]
+fn register_handler_by_method_looks_up_operation_and_dispatches_successfully() {
+    let mut dispatcher = HermesDispatcher::new();
+    dispatcher.load_contract_artifact(&hermes_fixture_json()).expect("fixture loads");
+
+    // 按 service.method 名注册 handler
+    dispatcher
+        .register_handler_by_method("IdentityService", "create", Box::new(CreateHandler))
+        .expect("create handler registers by method name");
+
+    let reply = dispatcher
+        .dispatch("IdentityService", "create", &create_params())
+        .expect("dispatch succeeds after method-name registration");
+    assert_eq!(reply, DispatchReply::Unary(json!({ "id": USER_ID, "displayName": "Ada" })));
+
+    // lookup 还没注册，应该失败
+    let err = dispatcher
+        .dispatch("IdentityService", "lookup", &lookup_params())
+        .expect_err("lookup handler still missing");
+    assert_eq!(err.code(), RpcErrorCode::HandlerNotRegistered);
+}
+
+#[test]
+fn register_method_handler_uses_method_id_and_dispatches_successfully() {
+    let mut dispatcher = HermesDispatcher::new();
+    dispatcher.load_contract_artifact(&hermes_fixture_json()).expect("fixture loads");
+
+    let lookup_method_id = dispatcher
+        .registry()
+        .resolve("IdentityService", "lookup")
+        .expect("resolve lookup")
+        .method_id()
+        .clone();
+
+    dispatcher
+        .register_method_handler(&lookup_method_id, Box::new(LookupHandler))
+        .expect("lookup handler registers by MethodId");
+
+    let reply = dispatcher
+        .dispatch("IdentityService", "lookup", &lookup_params())
+        .expect("dispatch succeeds after MethodId registration");
+    assert_eq!(reply, DispatchReply::ServerStream(vec![json!({ "id": USER_ID }), Value::Null]));
+}
+
+#[test]
+fn second_registration_for_the_same_method_fails_with_duplicate_registration() {
+    let mut dispatcher = HermesDispatcher::new();
+    dispatcher.load_contract_artifact(&hermes_fixture_json()).expect("fixture loads");
+
+    // 先用 register_handler_by_method 注册
+    dispatcher
+        .register_handler_by_method("IdentityService", "create", Box::new(CreateHandler))
+        .expect("first registration succeeds");
+
+    // 同一 service.method 再用 register_handler_by_method 注册 —— 应失败
+    let err = dispatcher
+        .register_handler_by_method("IdentityService", "create", Box::new(CreateHandler))
+        .expect_err("duplicate registration rejected");
+    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
+
+    // 同一 MethodId 用 register_method_handler 注册 —— 也应失败
+    let create_method_id = dispatcher
+        .registry()
+        .resolve("IdentityService", "create")
+        .expect("resolve create")
+        .method_id()
+        .clone();
+    let err = dispatcher
+        .register_method_handler(&create_method_id, Box::new(CreateHandler))
+        .expect_err("duplicate registration by MethodId rejected");
+    assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
+}

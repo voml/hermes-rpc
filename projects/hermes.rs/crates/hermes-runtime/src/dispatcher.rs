@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
-use vos_types::{MethodStreamMode, OperationContract, OperationId};
+use vos_types::{MethodId, MethodStreamMode, OperationContract, OperationId};
 
 use crate::{
     codec,
@@ -130,6 +130,42 @@ impl HermesDispatcher {
         }
         self.handlers.insert(operation_id, handler);
         Ok(())
+    }
+
+    /// 按 `service.method` 名查找对应的 `OperationId`，再注册 handler。
+    ///
+    /// 内部委托给 [`Self::register_handler`]，会走相同的 operation 存在性、
+    /// 重复注册等校验逻辑。
+    pub fn register_handler_by_method(
+        &mut self,
+        service_name: &str,
+        method_name: &str,
+        handler: Box<dyn HermesOperationHandler>,
+    ) -> RpcResult<()> {
+        let operation_id = self.registry.operation_for_method(service_name, method_name)?;
+        self.register_handler(operation_id.as_str(), handler)
+    }
+
+    /// 按 durable `MethodId` 查找对应的 `OperationId`，再注册 handler。
+    ///
+    /// 内部委托给 [`Self::register_handler`]，走相同的 operation 存在性、
+    /// 重复注册等校验逻辑。
+    pub fn register_method_handler(
+        &mut self,
+        method_id: &MethodId,
+        handler: Box<dyn HermesOperationHandler>,
+    ) -> RpcResult<()> {
+        let operation_id = self
+            .registry
+            .operation_id_for_method(method_id)
+            .cloned()
+            .ok_or_else(|| {
+                RpcError::new(
+                    RpcErrorCode::UnknownMethod,
+                    format!("method `{method_id}` not found in registry — cannot register handler"),
+                )
+            })?;
+        self.register_handler(operation_id.as_str(), handler)
     }
 
     /// 按 `service.method` dispatch，不设 deadline 也不绑定取消令牌。
