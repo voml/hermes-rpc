@@ -21,6 +21,7 @@ use axum::{Json, Router, extract::State, http::StatusCode, response::IntoRespons
 use hermes_runtime::{DispatchReply, HermesDispatcher, RpcError, RpcErrorCode};
 use serde_json::Value;
 use tokio::net::TcpListener;
+use tokio::signal;
 use tokio::task::JoinHandle;
 
 use crate::json_rpc::{JsonRpcError, JsonRpcErrorCode, JsonRpcRequest, JsonRpcResponse};
@@ -121,11 +122,22 @@ impl HttpTransport {
     /// 启动 HTTP server，阻塞直到 shutdown signal 或错误。
     ///
     /// 绑定 `config.bind_addr`（`"127.0.0.1:0"` 让 OS 分配随机端口），然后用 axum
-    /// 监听。返回的 `Ok(())` 只在收到 shutdown signal 时到达；正常运行期间一直挂起。
+    /// 监听。收到 **Ctrl+C**（所有平台）或 **SIGTERM**（Unix）时触发 graceful
+    /// shutdown：拒绝新连接，等待 in-flight 请求完成（由 axum 默认超时控制），
+    /// 最后返回 `Ok(())`。
     pub async fn listen(self, config: HttpTransportConfig) -> Result<(), TransportError> {
         let addr: SocketAddr = config.bind_addr.parse().map_err(|_| TransportError::InvalidAddress(config.bind_addr))?;
         let listener = TcpListener::bind(addr).await?;
-        axum::serve(listener, self.router()).await.map_err(|err| TransportError::Serve(Box::new(err)))
+
+        let shutdown = async {
+            // ctrl_c() 跨平台：Windows 捕获 Ctrl+C；Unix 额外监听 SIGINT + SIGTERM。
+            let _ = signal::ctrl_c().await;
+        };
+
+        axum::serve(listener, self.router())
+            .with_graceful_shutdown(shutdown)
+            .await
+            .map_err(|err| TransportError::Serve(Box::new(err)))
     }
 
     /// 非阻塞版本：在当前 tokio runtime 上起一个后台任务运行 server。
