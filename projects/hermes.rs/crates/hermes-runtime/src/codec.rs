@@ -47,7 +47,7 @@ pub enum WireCodec {
     Time,
     /// JSON string 承载的 UTC 日期时间（`datetime`）。
     DateTime,
-    /// JSON string 承载的二进制数据（`bytes`）。
+    /// JSON array 承载的二进制数据（`bytes`），每个元素是 `u8`（0–255）。
     Bytes,
     /// JSON object，承载用户类型（合同不携带字段布局）。
     Object {
@@ -205,8 +205,27 @@ pub fn check_value(codec: &WireCodec, value: &Value, path: &str, code: RpcErrorC
         | WireCodec::Uuid
         | WireCodec::Date
         | WireCodec::Time
-        | WireCodec::DateTime
-        | WireCodec::Bytes => expect_string(codec, value, path, code),
+        | WireCodec::DateTime => expect_string(codec, value, path, code),
+        WireCodec::Bytes => {
+            let array = value.as_array().ok_or_else(|| mismatch(codec, path, value, code))?;
+            let mut items = Vec::with_capacity(array.len());
+            for (index, item) in array.iter().enumerate() {
+                let byte = item.as_u64().ok_or_else(|| {
+                    RpcError::new(
+                        code,
+                        format!("{path}[{index}] must be a u8 integer, found {}", json_kind(item)),
+                    )
+                })?;
+                if byte > 255 {
+                    return Err(RpcError::new(
+                        code,
+                        format!("{path}[{index}] must be in 0..=255, found {byte}"),
+                    ));
+                }
+                items.push(Value::Number(serde_json::Number::from(byte as u8)));
+            }
+            Ok(Value::Array(items))
+        }
         WireCodec::Object { .. } => {
             if !value.is_object() {
                 return Err(mismatch(codec, path, value, code));
@@ -272,7 +291,7 @@ fn expected_shape(codec: &WireCodec) -> &'static str {
         WireCodec::Bool => "boolean",
         WireCodec::Integer { .. } => "integer number",
         WireCodec::Float => "number",
-        WireCodec::List(_) => "array",
+        WireCodec::List(_) | WireCodec::Bytes => "array",
         WireCodec::Optional(_) => "value",
         WireCodec::Object { .. } => "object",
         WireCodec::Utf8
@@ -281,7 +300,6 @@ fn expected_shape(codec: &WireCodec) -> &'static str {
         | WireCodec::Date
         | WireCodec::Time
         | WireCodec::DateTime
-        | WireCodec::Bytes
         | WireCodec::Int64
         | WireCodec::Uint64
         | WireCodec::Decimal => "string",

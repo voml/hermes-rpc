@@ -183,8 +183,9 @@ fn scalar_ts(scalar: CanonicalScalar) -> &'static str {
         | CanonicalScalar::Uuid
         | CanonicalScalar::Date
         | CanonicalScalar::Time
-        | CanonicalScalar::DateTime
-        | CanonicalScalar::Bytes => "string",
+        | CanonicalScalar::DateTime => "string",
+        // bytes 在 canonical wire 上用 u8 数组承载，TS 面直接映射为 Uint8Array
+        CanonicalScalar::Bytes => "Uint8Array",
     }
 }
 

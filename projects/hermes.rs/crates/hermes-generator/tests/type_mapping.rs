@@ -136,8 +136,8 @@ fn expected_scalar_ts(scalar: CanonicalScalar) -> &'static str {
         | CanonicalScalar::Uuid
         | CanonicalScalar::Date
         | CanonicalScalar::Time
-        | CanonicalScalar::DateTime
-        | CanonicalScalar::Bytes => "string",
+        | CanonicalScalar::DateTime => "string",
+        CanonicalScalar::Bytes => "Uint8Array",
     }
 }
 

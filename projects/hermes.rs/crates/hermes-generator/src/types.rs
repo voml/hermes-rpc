@@ -20,6 +20,10 @@ pub(crate) const NO_RETURN_TYPE: &str = "void";
 
 const UNKNOWN: &str = "unknown";
 
+/// canonical `bytes` 在 canonical wire 上用 u8 数组承载，TS 面映射成
+/// `Uint8Array`，让 transport adapter 层有机会做 base64 桥接。
+const BYTES_TS: &str = "Uint8Array";
+
 /// 解析一个 canonical type。
 pub(crate) fn resolve(ty: &CanonicalType) -> ResolvedType {
     match ty {
@@ -84,7 +88,8 @@ fn builtin(name: &str) -> Option<&'static str> {
         // 64 位与未定宽整数、decimal 与时间类类型在 wire 上按字符串承载，
         // 避免 JS number 精度丢失。codec descriptor 落地后以 descriptor 为准。
         "i64" | "u64" | "int" | "integer" | "bigint" | "decimal" | "uuid" | "date" | "datetime" | "timestamp" => Some("string"),
-        "bytes" | "binary" => Some("string"),
+        // bytes 在 canonical wire 上用 u8 数组承载，TS 面直接映射为 Uint8Array
+        "bytes" | "binary" => Some(BYTES_TS),
         "json" | "value" | "any" => Some(UNKNOWN),
         _ => None,
     }
