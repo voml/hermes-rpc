@@ -1,21 +1,17 @@
 //! HTTP/JSON-RPC 2.0 transport adapter 集成测试。
 //!
 //! 复用 `hermes-runtime` 的 fixture 构造真实 dispatcher，通过 `HttpTransport::handle_raw`
-//! 入口覆盖 JSON-RPC 2.0 规范的关键错误码和成功路径。
+//! 入口覆盖 JSON-RPC 2.0 规范的关键错误码和成功路径（含 batch / notification）。
 
 use std::sync::Arc;
 
 use hermes_runtime::{
-    CanonicalScalar, ContractArtifact, ContractFormat, ContractPayload, ContractProducer,
-    HermesDispatcher, HermesOperationHandler, MethodIdentityKey, MethodId,
-    MethodStreamMode, OperationContract, OperationEffect, OperationId, OperationIdentityKey,
-    OperationKind, OperationParameterContract, OperationParameterKey, OperationReply,
-    ResolvedCanonicalType, RpcResult, ServiceContract, ServiceId, ServiceIdentityKey,
-    ServiceMethodContract,
+    CanonicalScalar, ContractArtifact, ContractFormat, ContractPayload, ContractProducer, HermesDispatcher,
+    HermesOperationHandler, MethodId, MethodIdentityKey, MethodStreamMode, OperationContract, OperationEffect, OperationId,
+    OperationIdentityKey, OperationKind, OperationParameterContract, OperationParameterKey, OperationReply,
+    ResolvedCanonicalType, RpcResult, ServiceContract, ServiceId, ServiceIdentityKey, ServiceMethodContract,
 };
-use hermes_transport_http::{
-    JsonRpcErrorCode, JsonRpcRequest, JsonRpcResponse, HttpTransport,
-};
+use hermes_transport_http::{HandleOutcome, HttpTransport, JsonRpcErrorCode, JsonRpcRequest, JsonRpcResponse};
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
@@ -50,14 +46,8 @@ fn operation(
         .map(|(name, ty)| OperationParameterKey::new(name, &type_key(ty)).expect("param key"))
         .collect::<Vec<_>>();
     let result_key = result_type.as_ref().map(type_key).unwrap_or_else(|| "unit".to_string());
-    let identity = OperationIdentityKey::new(
-        &namespace,
-        OperationKind::Query,
-        name,
-        parameter_keys,
-        &result_key,
-    )
-    .expect("op identity");
+    let identity =
+        OperationIdentityKey::new(&namespace, OperationKind::Query, name, parameter_keys, &result_key).expect("op identity");
     OperationContract {
         operation_id: OperationId::derive(&identity),
         kind: OperationKind::Query,
@@ -139,14 +129,10 @@ fn fixture_dispatcher() -> Arc<HermesDispatcher> {
     );
 
     let mut dispatcher = HermesDispatcher::new();
-    dispatcher
-        .load_contract_artifact(&artifact.to_json().expect("seal"))
-        .expect("fixture loads");
+    dispatcher.load_contract_artifact(&artifact.to_json().expect("seal")).expect("fixture loads");
 
     // 注册 handler：简单返回 `a + b` 拼接的 utf8 字符串
-    dispatcher
-        .register_handler_by_method("Calc", "add", Box::new(AddConcatHandler))
-        .expect("add handler");
+    dispatcher.register_handler_by_method("Calc", "add", Box::new(AddConcatHandler)).expect("add handler");
 
     Arc::new(dispatcher)
 }
@@ -164,6 +150,31 @@ impl HermesOperationHandler for AddConcatHandler {
         let a = params.get("a").and_then(Value::as_str).unwrap_or("");
         let b = params.get("b").and_then(Value::as_str).unwrap_or("");
         Ok(OperationReply::Unary(Value::String(format!("{a}+{b}"))))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HandleOutcome 断言辅助
+// ---------------------------------------------------------------------------
+
+fn expect_single(outcome: HandleOutcome) -> JsonRpcResponse {
+    match outcome {
+        HandleOutcome::Single(resp) => resp,
+        other => panic!("expected HandleOutcome::Single, got {other:?}"),
+    }
+}
+
+fn expect_batch(outcome: HandleOutcome) -> Vec<JsonRpcResponse> {
+    match outcome {
+        HandleOutcome::Batch(vec) => vec,
+        other => panic!("expected HandleOutcome::Batch, got {other:?}"),
+    }
+}
+
+fn expect_no_content(outcome: HandleOutcome) {
+    match outcome {
+        HandleOutcome::NoContent => {}
+        other => panic!("expected HandleOutcome::NoContent, got {other:?}"),
     }
 }
 
@@ -194,12 +205,14 @@ fn assert_error(response: &JsonRpcResponse, expected_code: JsonRpcErrorCode) {
 fn method_not_found_returns_minus_32601() {
     let transport = HttpTransport::new(fixture_dispatcher());
 
-    let response = transport.handle_raw(r#"{
+    let response = expect_single(transport.handle_raw(
+        r#"{
         "jsonrpc": "2.0",
         "method": "Calc.noSuchMethod",
         "params": { "foo": "bar" },
         "id": 1
-    }"#);
+    }"#,
+    ));
 
     assert_error(&response, JsonRpcErrorCode::MethodNotFound);
     assert_eq!(response.id, Some(Value::Number(1.into())), "id must be echoed back");
@@ -210,12 +223,14 @@ fn method_not_found_returns_minus_32601() {
 fn unknown_service_also_returns_minus_32601() {
     let transport = HttpTransport::new(fixture_dispatcher());
 
-    let response = transport.handle_raw(r#"{
+    let response = expect_single(transport.handle_raw(
+        r#"{
         "jsonrpc": "2.0",
         "method": "NoSuchService.create",
         "params": {},
         "id": 42
-    }"#);
+    }"#,
+    ));
 
     assert_error(&response, JsonRpcErrorCode::MethodNotFound);
 }
@@ -226,7 +241,7 @@ fn unknown_service_also_returns_minus_32601() {
 fn malformed_json_returns_minus_32700() {
     let transport = HttpTransport::new(fixture_dispatcher());
 
-    let response = transport.handle_raw(r#"{ not valid json at all }"#);
+    let response = expect_single(transport.handle_raw(r#"{ not valid json at all }"#));
 
     assert_error(&response, JsonRpcErrorCode::ParseError);
     // 解析失败时 id 未知，按规范应为 null
@@ -238,11 +253,13 @@ fn malformed_json_returns_minus_32700() {
 fn missing_jsonrpc_version_returns_minus_32600() {
     let transport = HttpTransport::new(fixture_dispatcher());
 
-    let response = transport.handle_raw(r#"{
+    let response = expect_single(transport.handle_raw(
+        r#"{
         "method": "Calc.add",
         "params": { "a": "hello", "b": "world" },
         "id": 7
-    }"#);
+    }"#,
+    ));
 
     assert_error(&response, JsonRpcErrorCode::InvalidRequest);
     assert_eq!(response.id, Some(Value::Number(7.into())));
@@ -253,12 +270,14 @@ fn missing_jsonrpc_version_returns_minus_32600() {
 fn wrong_jsonrpc_version_returns_minus_32600() {
     let transport = HttpTransport::new(fixture_dispatcher());
 
-    let response = transport.handle_raw(r#"{
+    let response = expect_single(transport.handle_raw(
+        r#"{
         "jsonrpc": "1.0",
         "method": "Calc.add",
         "params": { "a": "x", "b": "y" },
         "id": 3
-    }"#);
+    }"#,
+    ));
 
     assert_error(&response, JsonRpcErrorCode::InvalidRequest);
 }
@@ -268,12 +287,14 @@ fn wrong_jsonrpc_version_returns_minus_32600() {
 fn malformed_method_string_returns_minus_32600() {
     let transport = HttpTransport::new(fixture_dispatcher());
 
-    let response = transport.handle_raw(r#"{
+    let response = expect_single(transport.handle_raw(
+        r#"{
         "jsonrpc": "2.0",
         "method": "justOneWord",
         "params": {},
         "id": 9
-    }"#);
+    }"#,
+    ));
 
     assert_error(&response, JsonRpcErrorCode::InvalidRequest);
 }
@@ -283,12 +304,14 @@ fn malformed_method_string_returns_minus_32600() {
 fn successful_dispatch_returns_result_and_echoes_id() {
     let transport = HttpTransport::new(fixture_dispatcher());
 
-    let response = transport.handle_raw(r#"{
+    let response = expect_single(transport.handle_raw(
+        r#"{
         "jsonrpc": "2.0",
         "method": "Calc.add",
         "params": { "a": "hello", "b": "world" },
         "id": "req-123"
-    }"#);
+    }"#,
+    ));
 
     assert_success(&response);
     assert_eq!(response.id, Some(Value::String("req-123".to_string())));
@@ -303,31 +326,42 @@ fn invalid_params_returns_minus_32602() {
     let transport = HttpTransport::new(fixture_dispatcher());
 
     // a 要求是 UTF8（string），这里传 number
-    let response = transport.handle_raw(r#"{
+    let response = expect_single(transport.handle_raw(
+        r#"{
         "jsonrpc": "2.0",
         "method": "Calc.add",
         "params": { "a": 42, "b": "y" },
         "id": 55
-    }"#);
+    }"#,
+    ));
 
     assert_error(&response, JsonRpcErrorCode::InvalidParams);
     assert_eq!(response.id, Some(Value::Number(55.into())));
 }
 
-/// 无 id 请求（notification）也能正确返回错误体
+/// notification 请求（无 `id`）无论 dispatch 成功失败都不返回响应
+/// JSON-RPC 2.0 spec §2.0：notification 没有响应
 #[test]
-fn notification_request_with_error_returns_response_with_null_id() {
+fn notification_request_returns_no_content() {
     let transport = HttpTransport::new(fixture_dispatcher());
 
-    // notification 没有 id，按规范响应 id 应为 null 或省略
-    let response = transport.handle_raw(r#"{
+    // notification 没有 id → NoContent（即使方法不存在也不返回错误体）
+    expect_no_content(transport.handle_raw(
+        r#"{
         "jsonrpc": "2.0",
         "method": "Calc.noSuch",
         "params": {}
-    }"#);
+    }"#,
+    ));
 
-    assert_error(&response, JsonRpcErrorCode::MethodNotFound);
-    assert!(response.id.is_none() || response.id == Some(Value::Null));
+    // 即使方法存在也是 NoContent
+    expect_no_content(transport.handle_raw(
+        r#"{
+        "jsonrpc": "2.0",
+        "method": "Calc.add",
+        "params": { "a": "x", "b": "y" }
+    }"#,
+    ));
 }
 
 /// HttpTransport 可以直接通过 handle 方法调用
@@ -345,4 +379,107 @@ fn direct_handle_method_accepts_parsed_request() {
     let response = transport.handle(request);
     assert_success(&response);
     assert_eq!(response.result.unwrap(), Value::String("foo+bar".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// batch 测试
+// ---------------------------------------------------------------------------
+
+/// 空 batch `[]` → -32600 Invalid Request
+#[test]
+fn empty_batch_returns_minus_32600() {
+    let transport = HttpTransport::new(fixture_dispatcher());
+
+    let response = expect_single(transport.handle_raw("[]"));
+    assert_error(&response, JsonRpcErrorCode::InvalidRequest);
+}
+
+/// batch 两个正常请求 → 返回两个响应
+#[test]
+fn batch_with_two_valid_requests_returns_two_responses() {
+    let transport = HttpTransport::new(fixture_dispatcher());
+
+    let batch = expect_batch(transport.handle_raw(
+        r#"[
+        {"jsonrpc": "2.0", "method": "Calc.add", "params": {"a": "x", "b": "y"}, "id": 1},
+        {"jsonrpc": "2.0", "method": "Calc.add", "params": {"a": "foo", "b": "bar"}, "id": 2}
+    ]"#,
+    ));
+
+    assert_eq!(batch.len(), 2);
+    assert_success(&batch[0]);
+    assert_eq!(batch[0].result.as_ref().unwrap(), &Value::String("x+y".to_string()));
+    assert_eq!(batch[0].id, Some(Value::Number(1.into())));
+    assert_success(&batch[1]);
+    assert_eq!(batch[1].result.as_ref().unwrap(), &Value::String("foo+bar".to_string()));
+    assert_eq!(batch[1].id, Some(Value::Number(2.into())));
+}
+
+/// batch 混合成功和失败
+#[test]
+fn batch_mixed_success_and_error() {
+    let transport = HttpTransport::new(fixture_dispatcher());
+
+    let batch = expect_batch(transport.handle_raw(
+        r#"[
+        {"jsonrpc": "2.0", "method": "Calc.add", "params": {"a": "x", "b": "y"}, "id": 1},
+        {"jsonrpc": "2.0", "method": "Calc.noSuch", "params": {}, "id": 2}
+    ]"#,
+    ));
+
+    assert_eq!(batch.len(), 2);
+    assert_success(&batch[0]);
+    assert_error(&batch[1], JsonRpcErrorCode::MethodNotFound);
+}
+
+/// batch 中 notification 被跳过，不进入响应数组
+#[test]
+fn batch_with_notification_excludes_it_from_response_array() {
+    let transport = HttpTransport::new(fixture_dispatcher());
+
+    let batch = expect_batch(transport.handle_raw(
+        r#"[
+        {"jsonrpc": "2.0", "method": "Calc.add", "params": {"a": "x", "b": "y"}, "id": 1},
+        {"jsonrpc": "2.0", "method": "Calc.add", "params": {"a": "skip", "b": "me"}},
+        {"jsonrpc": "2.0", "method": "Calc.add", "params": {"a": "a", "b": "b"}, "id": 3}
+    ]"#,
+    ));
+
+    // notification 被排除了 → 只有 2 个响应
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch[0].id, Some(Value::Number(1.into())));
+    assert_eq!(batch[1].id, Some(Value::Number(3.into())));
+}
+
+/// batch 全是 notification → NoContent
+#[test]
+fn batch_all_notifications_returns_no_content() {
+    let transport = HttpTransport::new(fixture_dispatcher());
+
+    expect_no_content(transport.handle_raw(
+        r#"[
+        {"jsonrpc": "2.0", "method": "Calc.add", "params": {"a": "x", "b": "y"}},
+        {"jsonrpc": "2.0", "method": "Calc.noSuch", "params": {}}
+    ]"#,
+    ));
+}
+
+/// batch 元素不是合法 JSON-RPC request → 该元素单独返回 -32600
+#[test]
+fn batch_invalid_element_gets_own_error() {
+    let transport = HttpTransport::new(fixture_dispatcher());
+
+    let batch = expect_batch(transport.handle_raw(
+        r#"[
+        {"jsonrpc": "2.0", "method": "Calc.add", "params": {"a": "x", "b": "y"}, "id": 1},
+        "not a json rpc object",
+        {"jsonrpc": "2.0", "method": "Calc.add", "params": {"a": "a", "b": "b"}, "id": 2}
+    ]"#,
+    ));
+
+    assert_eq!(batch.len(), 3);
+    assert_success(&batch[0]);
+    // 中间那个非法元素 → InvalidRequest
+    assert_error(&batch[1], JsonRpcErrorCode::InvalidRequest);
+    assert_success(&batch[2]);
 }

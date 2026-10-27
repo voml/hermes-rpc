@@ -45,6 +45,14 @@ pub struct JsonRpcRequest {
 }
 
 impl JsonRpcRequest {
+    /// 判断是否为 notification（没有 `id` 字段）。
+    ///
+    /// JSON-RPC 2.0 spec §2.0：notification 请求**不应**产生任何响应
+    /// —— HTTP 层应返回 204 No Content。
+    pub fn is_notification(&self) -> bool {
+        self.id.is_none()
+    }
+
     /// 校验协议版本是否存在且等于 `"2.0"`
     pub fn validate(&self) -> Result<(), JsonRpcError> {
         match self.jsonrpc.as_deref() {

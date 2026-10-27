@@ -15,5 +15,5 @@
 pub mod json_rpc;
 pub mod transport;
 
-pub use json_rpc::{JsonRpcError, JsonRpcErrorCode, JsonRpcRequest, JsonRpcResponse, JSONRPC_VERSION};
-pub use transport::{HttpTransport, HttpTransportConfig};
+pub use json_rpc::{JSONRPC_VERSION, JsonRpcError, JsonRpcErrorCode, JsonRpcRequest, JsonRpcResponse};
+pub use transport::{HandleOutcome, HttpTransport, HttpTransportConfig, TransportError};
