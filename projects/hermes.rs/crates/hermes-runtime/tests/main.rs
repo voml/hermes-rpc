@@ -1124,3 +1124,120 @@ fn second_registration_for_the_same_method_fails_with_duplicate_registration() {
         .expect_err("duplicate registration by MethodId rejected");
     assert_eq!(err.code(), RpcErrorCode::DuplicateRegistration);
 }
+
+// ---------------------------------------------------------------------------
+// WireCodec::Bytes 边界测试
+// ---------------------------------------------------------------------------
+
+/// 辅助函数：直接用 WireCodec + decode_value 做校验，避免走完整 dispatch 链路。
+fn bytes_codec() -> hermes_runtime::WireCodec {
+    hermes_runtime::WireCodec::Bytes
+}
+
+#[test]
+fn bytes_empty_array_is_accepted() {
+    let result = hermes_runtime::decode_value(&bytes_codec(), &json!([]));
+    assert!(result.is_ok(), "empty [] must decode as Bytes");
+    assert_eq!(result.unwrap(), json!([]));
+}
+
+#[test]
+fn bytes_single_zero_is_accepted() {
+    let result = hermes_runtime::decode_value(&bytes_codec(), &json!([0]));
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), json!([0]));
+}
+
+#[test]
+fn bytes_single_255_is_accepted_as_max_boundary() {
+    let result = hermes_runtime::decode_value(&bytes_codec(), &json!([255]));
+    assert!(result.is_ok(), "255 is the last valid u8");
+    assert_eq!(result.unwrap(), json!([255]));
+}
+
+#[test]
+fn bytes_multiple_including_0_1_128_255_is_accepted() {
+    let input = json!([0, 1, 128, 255]);
+    let result = hermes_runtime::decode_value(&bytes_codec(), &input);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), input);
+}
+
+#[test]
+fn bytes_256_is_rejected_as_out_of_range() {
+    let err = hermes_runtime::decode_value(&bytes_codec(), &json!([256])).expect_err("256 is above u8::MAX");
+    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
+    assert!(err.message().contains("must be in 0..=255"));
+}
+
+#[test]
+fn bytes_negative_one_is_rejected() {
+    let err = hermes_runtime::decode_value(&bytes_codec(), &json!([-1])).expect_err("negative cannot be u8");
+    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
+    assert!(
+        err.message().contains("must be a u8 integer") || err.message().contains("as_u64"),
+        "as_u64 rejects negatives; diagnostic should mention the shape mismatch"
+    );
+}
+
+#[test]
+fn bytes_non_integer_float_is_rejected() {
+    let err = hermes_runtime::decode_value(&bytes_codec(), &json!([1.5])).expect_err("float cannot be u8");
+    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
+    assert!(err.message().contains("must be a u8 integer"));
+}
+
+#[test]
+fn bytes_string_is_rejected() {
+    let err = hermes_runtime::decode_value(&bytes_codec(), &json!("hello")).expect_err("string is not an array");
+    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
+    assert!(err.message().contains("must be JSON array"));
+}
+
+#[test]
+fn bytes_null_is_rejected() {
+    let err = hermes_runtime::decode_value(&bytes_codec(), &json!(null)).expect_err("null is not an array");
+    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
+    assert!(err.message().contains("must be JSON array"));
+}
+
+#[test]
+fn list_of_bytes_is_accepted_for_nested_byte_arrays() {
+    let codec = hermes_runtime::WireCodec::List(Box::new(hermes_runtime::WireCodec::Bytes));
+    let input = json!([[1, 2], [3, 4]]);
+    let result = hermes_runtime::decode_value(&codec, &input);
+    assert!(result.is_ok(), "List<Bytes> accepts nested arrays");
+    assert_eq!(result.unwrap(), input);
+}
+
+#[test]
+fn list_of_bytes_rejects_inner_overflow() {
+    let codec = hermes_runtime::WireCodec::List(Box::new(hermes_runtime::WireCodec::Bytes));
+    let err = hermes_runtime::decode_value(&codec, &json!([[1, 2], [256]])).expect_err("inner byte 256 rejected");
+    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
+    assert!(err.message().contains("must be in 0..=255"));
+}
+
+#[test]
+fn optional_bytes_accepts_null() {
+    let codec = hermes_runtime::WireCodec::Optional(Box::new(hermes_runtime::WireCodec::Bytes));
+    let result = hermes_runtime::decode_value(&codec, &json!(null));
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), json!(null));
+}
+
+#[test]
+fn optional_bytes_accepts_value_array() {
+    let codec = hermes_runtime::WireCodec::Optional(Box::new(hermes_runtime::WireCodec::Bytes));
+    let input = json!([1, 2, 3]);
+    let result = hermes_runtime::decode_value(&codec, &input);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), input);
+}
+
+#[test]
+fn optional_bytes_rejects_inner_bad_value() {
+    let codec = hermes_runtime::WireCodec::Optional(Box::new(hermes_runtime::WireCodec::Bytes));
+    let err = hermes_runtime::decode_value(&codec, &json!(["hello"])).expect_err("inner element string rejected");
+    assert_eq!(err.code(), RpcErrorCode::InvalidRequest);
+}
