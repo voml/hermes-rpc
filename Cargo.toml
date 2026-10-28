@@ -20,7 +20,7 @@ authors = ["Aster <192607617@qq.com>"]
 license = "MPL-2.0"
 
 [workspace.dependencies]
-vos-types = { git = "https://github.com/voml/vos-language.git", branch = "dev" }
+vos-types = { git = "https://github.com/voml/vos-language.git", rev = "67c70cb119ce3dcc55ca7ba607014a49c9c9614e" }
 napi = { version = "2", features = ["napi8"] }
 napi-derive = "2"
 serde = { version = "1", features = ["derive"] }
