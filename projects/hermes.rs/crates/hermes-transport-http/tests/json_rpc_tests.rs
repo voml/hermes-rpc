@@ -63,6 +63,7 @@ fn operation(
         capabilities: Vec::new(),
         source_unit_id: 0,
         span: (0..0usize).into(),
+        stable_id_hint: None,
     }
 }
 
@@ -83,6 +84,7 @@ fn method(
         stream,
         operation_id: operation_id.clone(),
         attributes: Vec::new(),
+        stable_id_hint: None,
     }
 }
 
@@ -97,6 +99,7 @@ fn service(path: &[&str], methods: Vec<ServiceMethodContract>) -> ServiceContrac
         methods,
         source_unit_id: 0,
         span: (0..0usize).into(),
+        stable_id_hint: None,
     }
 }
 

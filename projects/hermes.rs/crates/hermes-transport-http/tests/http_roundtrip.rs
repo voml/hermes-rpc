@@ -69,6 +69,7 @@ fn fixture_dispatcher() -> Arc<HermesDispatcher> {
             capabilities: Vec::new(),
             source_unit_id: 0,
             span: (0..0usize).into(),
+            stable_id_hint: None,
         }
     };
 
@@ -88,9 +89,11 @@ fn fixture_dispatcher() -> Arc<HermesDispatcher> {
             stream: MethodStreamMode::Unary,
             operation_id: add_op.operation_id.clone(),
             attributes: Vec::new(),
+            stable_id_hint: None,
         }],
         source_unit_id: 0,
         span: (0..0usize).into(),
+        stable_id_hint: None,
     };
 
     let artifact = ContractArtifact::seal(

@@ -39,6 +39,7 @@ pub fn operation() -> OperationContract {
         capabilities: Vec::new(),
         source_unit_id: 0,
         span: (0..16usize).into(),
+        stable_id_hint: None,
     }
 }
 
@@ -59,9 +60,11 @@ pub fn service(operation: &OperationContract) -> ServiceContract {
             stream: MethodStreamMode::Unary,
             operation_id: operation.operation_id.clone(),
             attributes: Vec::new(),
+            stable_id_hint: None,
         }],
         source_unit_id: 0,
         span: (0..32usize).into(),
+        stable_id_hint: None,
     }
 }
 

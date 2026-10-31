@@ -50,6 +50,7 @@ fn operation(
             .map(|(name, type_expr, span)| OperationParameter { name: name.to_string(), type_expr, span: span.into() })
             .collect(),
         return_type,
+        attributes: Vec::new(),
         signature: None,
         body: None,
         span: span.into(),
