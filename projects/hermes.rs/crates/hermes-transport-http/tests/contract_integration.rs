@@ -11,7 +11,7 @@ use std::sync::Arc;
 use hermes_runtime::{
     HermesDispatcher, HermesOperationHandler, OperationContract, OperationReply, RpcResult,
 };
-use hermes_transport_http::{HttpTransport, HttpTransportConfig};
+use hermes_transport_http::HttpTransport;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -123,7 +123,7 @@ async fn spawn_server(transport: HttpTransport) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
     tokio::spawn(async move {
-        axum::serve(listener, transport.router())
+        axum::serve(listener, transport.make_service())
             .await
             .expect("axum serve");
     });
@@ -239,7 +239,7 @@ async fn fixture_create_invalid_param_shape_returns_minus_32602() {
 #[tokio::test]
 async fn fixture_listen_via_serve_background() {
     let transport = HttpTransport::new(fixture_dispatcher());
-    let handle = transport.serve_background(HttpTransportConfig::default());
+    let handle = transport.serve_background();
 
     // 稍等 server 起来
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;

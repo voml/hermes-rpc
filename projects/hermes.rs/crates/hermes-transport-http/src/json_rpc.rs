@@ -42,6 +42,8 @@ pub enum JsonRpcErrorCode {
 ///
 /// `jsonrpc` 使用 `Option<String>` 以便 serde 在字段缺失时返回 `None` 而不是
 /// 触发解析错误（这样 transport adapter 可以返回标准的 `-32600 Invalid Request`）。
+/// `deadline` 是 Hermes 跨进程扩展成员：UTC epoch 毫秒整数，与生成 client 的
+/// `CallOptions.deadline` 同一语义；转换与强制都在 runtime，不在本类型里。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     /// 协议版本，必须为 `"2.0"`；缺失时为 `None`
@@ -53,6 +55,9 @@ pub struct JsonRpcRequest {
     pub params: Value,
     /// 请求标识，响应时原样回填；notification 可为 `None`
     pub id: Option<Value>,
+    /// Hermes 扩展：绝对 deadline（UTC epoch 毫秒）；`None` 表示不设 deadline
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<i64>,
 }
 
 impl JsonRpcRequest {

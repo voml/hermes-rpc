@@ -16,4 +16,7 @@ pub mod json_rpc;
 pub mod transport;
 
 pub use json_rpc::{JSONRPC_VERSION, JsonRpcError, JsonRpcErrorCode, JsonRpcRequest, JsonRpcResponse};
-pub use transport::{HandleOutcome, HttpTransport, HttpTransportConfig, TransportError, map_rpc_error_to_jsonrpc};
+pub use transport::{
+    DisconnectAwareMakeService, DisconnectAwareService, HandleOutcome, HttpTransport, HttpTransportConfig, TransportError,
+    map_rpc_error_to_jsonrpc,
+};
