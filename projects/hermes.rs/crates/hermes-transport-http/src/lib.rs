@@ -4,11 +4,11 @@
 //!
 //! - JSON-RPC 2.0 wire 类型（`json_rpc` 模块）
 //! - `HttpTransport`：持有 `Arc<HermesDispatcher>`，负责协议层适配
-//! - 错误码映射：Hermes `RpcErrorCode` → JSON-RPC 2.0 标准码
+//! - 错误码映射：[`transport::map_rpc_error_to_jsonrpc`] 是 Hermes `RpcErrorCode`
+//!   → JSON-RPC 2.0 错误体的唯一映射表
+//! - 生命周期桥接：wire `deadline` 成员与客户断连折算成 runtime 的
+//!   `CallOptions`（deadline + `CancelToken`），不在 transport 内另造取消状态机
 //! - `axum::Router` 生成，挂载在 `/rpc`
-//!
-//! 骨架阶段只覆盖 unary 请求（单请求单响应）。server-stream、batch、
-//! notification 等高级语义留待后续迭代。
 
 #![deny(missing_docs)]
 
@@ -16,4 +16,4 @@ pub mod json_rpc;
 pub mod transport;
 
 pub use json_rpc::{JSONRPC_VERSION, JsonRpcError, JsonRpcErrorCode, JsonRpcRequest, JsonRpcResponse};
-pub use transport::{HandleOutcome, HttpTransport, HttpTransportConfig, TransportError};
+pub use transport::{HandleOutcome, HttpTransport, HttpTransportConfig, TransportError, map_rpc_error_to_jsonrpc};

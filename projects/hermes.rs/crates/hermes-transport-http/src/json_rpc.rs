@@ -12,7 +12,12 @@ use serde_json::Value;
 /// JSON-RPC 协议版本，固定为 `"2.0"`
 pub const JSONRPC_VERSION: &str = "2.0";
 
-/// JSON-RPC 2.0 标准错误码
+/// JSON-RPC 2.0 错误码：标准码 + Hermes 扩展码
+///
+/// `-32700` ~ `-32603` 是 JSON-RPC 2.0 规范定义的标准码；`-32000` ~ `-32099`
+/// 是规范保留给实现自定义的 primitive server error 区间，Hermes 在其中固定
+/// 分配三个扩展码，让超时、取消与 handler 失败在**错误码层面**就可区分，
+/// 不需要解析 `data`。完整映射表见 [`crate::transport::map_rpc_error_to_jsonrpc`]。
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum JsonRpcErrorCode {
     /// `-32700` — JSON 解析失败
@@ -25,6 +30,12 @@ pub enum JsonRpcErrorCode {
     InvalidParams = -32602,
     /// `-32603` — 内部错误
     InternalError = -32603,
+    /// `-32000` — Hermes 扩展：业务 handler 执行失败
+    HandlerFailed = -32000,
+    /// `-32001` — Hermes 扩展：调用被取消
+    Cancelled = -32001,
+    /// `-32002` — Hermes 扩展：deadline 超限
+    DeadlineExceeded = -32002,
 }
 
 /// JSON-RPC 2.0 请求体

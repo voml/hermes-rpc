@@ -320,22 +320,40 @@ fn split_method(method: &str) -> Option<(&str, &str)> {
     if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() { Some((parts[0], parts[1])) } else { None }
 }
 
-/// Hermes `RpcError` → JSON-RPC 2.0 错误
-fn map_rpc_error_to_jsonrpc(err: RpcError) -> JsonRpcError {
-    match err.code() {
-        RpcErrorCode::UnknownMethod | RpcErrorCode::UnknownService => {
-            JsonRpcError::new(JsonRpcErrorCode::MethodNotFound, err.message().to_string(), None)
-        }
-        RpcErrorCode::InvalidRequest => JsonRpcError::new(JsonRpcErrorCode::InvalidParams, err.message().to_string(), None),
-        other => {
-            // 保留 Hermes 错误码在 data 里，便于宿主做更细粒度处理
-            let data = serde_json::json!({
-                "hermes_code": other.as_str(),
-                "diagnostic_code": err.diagnostic_code(),
-            });
-            JsonRpcError::new(JsonRpcErrorCode::InternalError, err.message().to_string(), Some(data))
-        }
-    }
+/// Hermes `RpcError` → JSON-RPC 2.0 错误的**唯一**映射表。
+///
+/// 全分支穷举 `RpcErrorCode`，不留兜底 `other` 臂：新增错误码必须在此显式
+/// 归类，编译期强制。`data` 形状固定为 `{"hermes_code": "<kebab>", "diagnostic_code": "<上游码>"}`，
+/// `diagnostic_code` 仅在该错误携带上游 artifact 诊断码时出现。
+///
+/// | `RpcErrorCode` | JSON-RPC code |
+/// |---|---|
+/// | `unknown-service` / `unknown-method` / `unknown-operation` / `handler-not-registered` | `-32601` |
+/// | `invalid-request` | `-32602` |
+/// | `artifact-corrupt` / `duplicate-registration` / `missing-operation-binding` / `unsupported-codec` / `stream-mode-mismatch` / `internal` | `-32603` |
+/// | `handler-failed` | `-32000` |
+/// | `cancelled` | `-32001` |
+/// | `deadline-exceeded` | `-32002` |
+pub fn map_rpc_error_to_jsonrpc(err: RpcError) -> JsonRpcError {
+    let code = match err.code() {
+        RpcErrorCode::UnknownService | RpcErrorCode::UnknownMethod | RpcErrorCode::UnknownOperation
+        | RpcErrorCode::HandlerNotRegistered => JsonRpcErrorCode::MethodNotFound,
+        RpcErrorCode::InvalidRequest => JsonRpcErrorCode::InvalidParams,
+        RpcErrorCode::ArtifactCorrupt
+        | RpcErrorCode::DuplicateRegistration
+        | RpcErrorCode::MissingOperationBinding
+        | RpcErrorCode::UnsupportedCodec
+        | RpcErrorCode::StreamModeMismatch
+        | RpcErrorCode::Internal => JsonRpcErrorCode::InternalError,
+        RpcErrorCode::HandlerFailed => JsonRpcErrorCode::HandlerFailed,
+        RpcErrorCode::Cancelled => JsonRpcErrorCode::Cancelled,
+        RpcErrorCode::DeadlineExceeded => JsonRpcErrorCode::DeadlineExceeded,
+    };
+    let data = match err.diagnostic_code() {
+        Some(diagnostic) => serde_json::json!({ "hermes_code": err.code().as_str(), "diagnostic_code": diagnostic }),
+        None => serde_json::json!({ "hermes_code": err.code().as_str() }),
+    };
+    JsonRpcError::new(code, err.message().to_string(), Some(data))
 }
 
 // ---------------------------------------------------------------------------
@@ -365,11 +383,12 @@ mod tests {
     }
 
     #[test]
-    fn map_rpc_error_maps_known_codes_to_jsonrpc_standard() {
+    fn map_rpc_error_follows_the_single_source_of_truth_table() {
         let not_found = RpcError::new(RpcErrorCode::UnknownMethod, "no such method");
         let mapped = map_rpc_error_to_jsonrpc(not_found);
         assert_eq!(mapped.code, JsonRpcErrorCode::MethodNotFound as i32);
-        assert!(mapped.data.is_none());
+        assert_eq!(mapped.data.as_ref().unwrap()["hermes_code"], "unknown-method");
+        assert!(mapped.data.as_ref().unwrap().get("diagnostic_code").is_none());
 
         let invalid_req = RpcError::new(RpcErrorCode::InvalidRequest, "missing param");
         let mapped = map_rpc_error_to_jsonrpc(invalid_req);
@@ -377,8 +396,45 @@ mod tests {
 
         let handler_fail = RpcError::new(RpcErrorCode::HandlerFailed, "boom");
         let mapped = map_rpc_error_to_jsonrpc(handler_fail);
+        assert_eq!(mapped.code, JsonRpcErrorCode::HandlerFailed as i32);
+        assert_eq!(mapped.data.as_ref().unwrap()["hermes_code"], "handler-failed");
+
+        let cancelled = RpcError::new(RpcErrorCode::Cancelled, "dispatch cancelled");
+        assert_eq!(map_rpc_error_to_jsonrpc(cancelled).code, JsonRpcErrorCode::Cancelled as i32);
+
+        let deadline = RpcError::new(RpcErrorCode::DeadlineExceeded, "dispatch deadline exceeded");
+        assert_eq!(map_rpc_error_to_jsonrpc(deadline).code, JsonRpcErrorCode::DeadlineExceeded as i32);
+
+        let corrupt = RpcError::new(RpcErrorCode::ArtifactCorrupt, "bad artifact").with_diagnostic_code("SVC004");
+        let mapped = map_rpc_error_to_jsonrpc(corrupt);
         assert_eq!(mapped.code, JsonRpcErrorCode::InternalError as i32);
-        assert!(mapped.data.is_some());
+        assert_eq!(mapped.data.as_ref().unwrap()["hermes_code"], "artifact-corrupt");
+        assert_eq!(mapped.data.as_ref().unwrap()["diagnostic_code"], "SVC004");
+    }
+
+    #[test]
+    fn every_rpc_error_code_is_classified_by_the_table() {
+        // 穷举断言：任何新增 RpcErrorCode 都必须进入映射表，禁止落入未定义分支。
+        let cases = [
+            (RpcErrorCode::ArtifactCorrupt, JsonRpcErrorCode::InternalError),
+            (RpcErrorCode::UnknownService, JsonRpcErrorCode::MethodNotFound),
+            (RpcErrorCode::UnknownMethod, JsonRpcErrorCode::MethodNotFound),
+            (RpcErrorCode::UnknownOperation, JsonRpcErrorCode::MethodNotFound),
+            (RpcErrorCode::MissingOperationBinding, JsonRpcErrorCode::InternalError),
+            (RpcErrorCode::HandlerNotRegistered, JsonRpcErrorCode::MethodNotFound),
+            (RpcErrorCode::DuplicateRegistration, JsonRpcErrorCode::InternalError),
+            (RpcErrorCode::InvalidRequest, JsonRpcErrorCode::InvalidParams),
+            (RpcErrorCode::UnsupportedCodec, JsonRpcErrorCode::InternalError),
+            (RpcErrorCode::HandlerFailed, JsonRpcErrorCode::HandlerFailed),
+            (RpcErrorCode::StreamModeMismatch, JsonRpcErrorCode::InternalError),
+            (RpcErrorCode::DeadlineExceeded, JsonRpcErrorCode::DeadlineExceeded),
+            (RpcErrorCode::Cancelled, JsonRpcErrorCode::Cancelled),
+            (RpcErrorCode::Internal, JsonRpcErrorCode::InternalError),
+        ];
+        for (hermes_code, jsonrpc_code) in cases {
+            let mapped = map_rpc_error_to_jsonrpc(RpcError::new(hermes_code, "probe"));
+            assert_eq!(mapped.code, jsonrpc_code as i32, "`{hermes_code}` must map to {jsonrpc_code:?}");
+        }
     }
 
     #[test]

@@ -935,6 +935,34 @@ fn cancellation_while_waiting_for_a_permit_returns_cancelled() {
     assert!(matches!(held, DispatchReply::Unary(_)));
 }
 
+/// 执行时 panic 的 handler，验证 dispatch 的 panic 隔离。
+struct PanicHandler;
+
+impl HermesOperationHandler for PanicHandler {
+    fn execute(
+        &self,
+        _ctx: &hermes_runtime::CallContext,
+        _operation: &OperationContract,
+        _params: &Value,
+    ) -> RpcResult<OperationReply> {
+        panic!("handler exploded");
+    }
+}
+
+#[test]
+fn handler_panic_is_isolated_as_internal_error_and_host_stays_usable() {
+    let dispatcher = lifecycle_dispatcher(Box::new(PanicHandler));
+
+    let err = dispatcher.dispatch("IdentityService", "create", &create_params()).expect_err("panic must not escape");
+    assert_eq!(err.code(), RpcErrorCode::Internal);
+    assert!(err.message().contains("panicked"), "message names the panic: {}", err.message());
+
+    // panic 不破坏 dispatcher：合同与 handler 注册表仍然完好可用。
+    assert!(dispatcher.registry().resolve("IdentityService", "create").is_ok());
+    let err = dispatcher.dispatch("IdentityService", "create", &create_params()).expect_err("second call still panics");
+    assert_eq!(err.code(), RpcErrorCode::Internal);
+}
+
 // ---------------------------------------------------------------------------
 // wire 错误码
 // ---------------------------------------------------------------------------

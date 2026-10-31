@@ -206,7 +206,16 @@ impl HermesDispatcher {
         ctx.check()?;
 
         let decoded = codec::decode_params(operation, params)?;
-        let reply = handler.execute(&ctx, operation, &decoded);
+        // handler panic 隔离：panic 被折算成 `internal` 错误，宿主线程与后续请求
+        // 不受影响。错误分类仍只有 [`crate::error`] 一处真相源。
+        let operation_id = operation.operation_id.clone();
+        let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler.execute(&ctx, operation, &decoded)))
+            .unwrap_or_else(|_| {
+                Err(RpcError::new(
+                    RpcErrorCode::Internal,
+                    format!("handler for operation `{operation_id}` panicked"),
+                ))
+            });
         ctx.check()?;
         self.validate_reply(route, reply?)
     }
