@@ -16,4 +16,5 @@ tokio = { workspace = true }
 tower-service = { workspace = true }
 
 [dev-dependencies]
+hermes-generator = { path = "../hermes-generator" }
 tokio = { workspace = true }
