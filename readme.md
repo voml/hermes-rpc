@@ -44,7 +44,7 @@ hermes-rpc/
 
 ## 文档约定
 
-本仓只保留：本入口 README、各 npm 包的发布 README（`package.json` 的 `files` 依赖它们）、以及 `hermes-skills` 的 SKILL/README。新增设计说明一律写入根设计仓，不在本仓创建 `docs/`、交接文档或第二份架构说明。
+本仓只保留：本入口 README、各 npm 包的发布 README（`package.json` 的 `files` 依赖它们）、以及 `hermes-skills` 的 SKILL/README。新增设计说明一律写入工作区侧的设计记录，不在本仓创建设计文档目录、交接说明或第二份架构说明。
 
 ## 验证
 
